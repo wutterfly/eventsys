@@ -9,7 +9,7 @@ repository = "https://github.com/wutterfly/eventsys"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anythingy = { git = "https://github.com/wutterfly/anythingy" }
+anythingy = { version = "0.1" }
 
 
 [dev-dependencies]
