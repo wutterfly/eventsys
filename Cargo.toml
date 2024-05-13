@@ -1,6 +1,6 @@
 [package]
 name = "eventsys"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A library for dispatching and processing events. Events can be handled in a deferred and/or immediate way."
 license = "MIT"
@@ -9,17 +9,11 @@ repository = "https://github.com/wutterfly/eventsys"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anythingy = { version = "0.1" }
+anythingy = { version = "0.1.2" }
 
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = [] }
-
-
-[profile.release]
-incremental = true
-debug = true
-lto = "fat"
 
 
 [[bench]]

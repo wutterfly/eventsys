@@ -5,7 +5,43 @@ use std::{
     sync::{atomic::AtomicBool, MutexGuard},
 };
 
-pub type Event<const SIZE: usize> = anythingy::Thing<SIZE>;
+#[derive(Debug)]
+pub struct Event<const SIZE: usize>(anythingy::Thing<SIZE>);
+
+impl<const SIZE: usize> RefUnwindSafe for Event<SIZE> {}
+
+// SAFETY: This is safe, because we check the trait bounds at event creation.
+unsafe impl<const SIZE: usize> Send for Event<SIZE> {}
+
+impl<const SIZE: usize> Event<SIZE> {
+    #[inline]
+    pub fn new<T>(t: T) -> Self
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
+        Self(anythingy::Thing::new(t))
+    }
+
+    #[inline]
+    const fn fitting<T: 'static>() -> bool {
+        anythingy::Thing::<SIZE>::fitting::<T>()
+    }
+
+    #[inline]
+    const fn size_requirement<T: 'static>() -> usize {
+        anythingy::Thing::<SIZE>::size_requirement::<T>()
+    }
+
+    #[inline]
+    pub fn get<T: 'static>(self) -> T {
+        self.0.get()
+    }
+
+    #[inline]
+    pub fn get_ref<T: 'static>(&self) -> &T {
+        self.0.get_ref()
+    }
+}
 
 use crate::{
     err::{EventError, EventSizeError, Value},
@@ -50,7 +86,10 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// system.register_store::<(u16, u16)>(SlotType::Last).unwrap();
     /// # }
     /// ```
-    pub fn register_store<T: 'static>(&mut self, typ: SlotType<T>) -> Result<(), EventError<T>> {
+    pub fn register_store<T>(&mut self, typ: SlotType<T>) -> Result<(), EventError<T>>
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if T can be used as an event
         if !Event::<EVENT_SIZE>::fitting::<T>() {
             return Err(EventError::event_size_empty(EventSizeError::new(
@@ -94,10 +133,13 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// system.register_listener::<u32>(listener).unwrap();
     /// # }
     /// ```
-    pub fn register_listener<T: 'static>(
+    pub fn register_listener<T>(
         &mut self,
         listener: impl Fn(&T) + Send + Sync + RefUnwindSafe + 'static,
-    ) -> Result<usize, EventSizeError> {
+    ) -> Result<usize, EventSizeError>
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if T can be used as an event
         if !Event::<EVENT_SIZE>::fitting::<T>() {
             return Err(EventSizeError::new(
@@ -143,7 +185,10 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// system.new_event::<u32>(42).unwrap();
     /// # }
     /// ```
-    pub fn new_event<T: 'static>(&self, value: T) -> Result<(), EventError<T, Value>> {
+    pub fn new_event<T>(&self, value: T) -> Result<(), EventError<T, Value>>
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if T can be used as an event
         if !Event::<EVENT_SIZE>::fitting::<T>() {
             let err = EventSizeError::new(EVENT_SIZE, Event::<EVENT_SIZE>::size_requirement::<T>());
@@ -180,7 +225,10 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// }
     /// # }
     /// ```
-    pub fn query<T: 'static>(&self) -> Result<UnblockingQuery<T, EVENT_SIZE>, EventError<T>> {
+    pub fn query<T>(&self) -> Result<UnblockingQuery<T, EVENT_SIZE>, EventError<T>>
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if T can be used as an event
         if !Event::<EVENT_SIZE>::fitting::<T>() {
             return Err(EventError::event_size_empty(EventSizeError::new(
@@ -224,7 +272,10 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// }
     /// # }
     /// ```
-    pub fn query_blocking<T: 'static>(&self) -> Result<Query<T, EVENT_SIZE>, EventError<T>> {
+    pub fn query_blocking<T>(&self) -> Result<Query<T, EVENT_SIZE>, EventError<T>>
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if T can be used as an event
         if !Event::<EVENT_SIZE>::fitting::<T>() {
             return Err(EventError::event_size_empty(EventSizeError::new(
@@ -260,7 +311,10 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// system.disable::<u64>().unwrap();
     /// # }
     /// ```
-    pub fn disable<T: 'static>(&self) -> Result<(), EventError<T>> {
+    pub fn disable<T>(&self) -> Result<(), EventError<T>>
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if T can be used as an event
         if !Event::<EVENT_SIZE>::fitting::<T>() {
             return Err(EventError::event_size_empty(EventSizeError::new(
@@ -309,7 +363,10 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// system.enable::<u64>().unwrap();
     /// # }
     /// ```
-    pub fn enable<T: 'static>(&self) -> Result<(), EventError<T>> {
+    pub fn enable<T>(&self) -> Result<(), EventError<T>>
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if T can be used as an event
         if !Event::<EVENT_SIZE>::fitting::<T>() {
             return Err(EventError::event_size_empty(EventSizeError::new(
