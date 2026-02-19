@@ -2,7 +2,7 @@ use std::{
     any::TypeId,
     collections::VecDeque,
     panic::RefUnwindSafe,
-    sync::{atomic::AtomicBool, MutexGuard},
+    sync::{MutexGuard, atomic::AtomicBool},
 };
 
 #[derive(Debug)]
@@ -11,7 +11,7 @@ pub struct Event<const SIZE: usize>(anythingy::Thing<SIZE>);
 impl<const SIZE: usize> RefUnwindSafe for Event<SIZE> {}
 
 // SAFETY: This is safe, because we check the trait bounds at event creation.
-unsafe impl<const SIZE: usize> Send for Event<SIZE> {}
+unsafe impl<const SIZE: usize> Send for Event<SIZE> where anythingy::Thing<SIZE>: Send {}
 
 impl<const SIZE: usize> Event<SIZE> {
     #[inline]
@@ -44,11 +44,11 @@ impl<const SIZE: usize> Event<SIZE> {
 }
 
 use crate::{
+    DEFAULT_EVENT_SIZE,
     err::{EventError, EventSizeError, Value},
     map::RegisteredMap,
     query::{Query, UnblockingQuery},
     slot::{Slot, SlotType},
-    DEFAULT_EVENT_SIZE,
 };
 
 /// System to register events and event listeners as well as dispatch and query events.
@@ -71,7 +71,7 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
         }
     }
 
-    /// Registers a new type of event. Registered events can be querried in a batch.
+    /// Registers a new type of event. Registered events can be quarried in a batch.
     ///
     /// # Errors
     /// Returns an `EventError`, if
@@ -200,7 +200,7 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
         if let Some(registered) = self.registered.get(&id) {
             registered.handle_event(Event::new(value));
         } else {
-            return Err(EventError::unregisted_event(value));
+            return Err(EventError::unregistered_event(value));
         }
 
         Ok(())
@@ -272,7 +272,7 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// }
     /// # }
     /// ```
-    pub fn query_blocking<T>(&self) -> Result<Query<T, EVENT_SIZE>, EventError<T>>
+    pub fn query_blocking<T>(&self) -> Result<Query<'_, T, EVENT_SIZE>, EventError<T>>
     where
         T: Send + RefUnwindSafe + 'static,
     {
@@ -349,7 +349,7 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
         }
     }
 
-    /// Enables specific event for processesing.
+    /// Enables specific event for processing.
     ///
     /// # Errors
     /// Returns an `UnregisteredEventTypeError`, if the event type is not registered or no event listener was registered.
@@ -468,7 +468,7 @@ impl<const SIZE: usize> Registered<SIZE> {
     }
 
     #[inline]
-    pub fn events(&self) -> Option<MutexGuard<VecDeque<Event<SIZE>>>> {
+    pub fn events(&self) -> Option<MutexGuard<'_, VecDeque<Event<SIZE>>>> {
         self.slot.as_ref().map(Slot::events)
     }
 

@@ -19,7 +19,7 @@ where
 {
     /// Creates a new `Query` to iterate over events from type `T`.
     #[inline]
-    pub(crate) fn new(events: MutexGuard<'a, VecDeque<Event<EVENT_SIZE>>>) -> Self {
+    pub(crate) const fn new(events: MutexGuard<'a, VecDeque<Event<EVENT_SIZE>>>) -> Self {
         Self {
             events,
             _t: PhantomData,
@@ -33,7 +33,7 @@ where
     }
 }
 
-impl<'a, T, const EVENT_SIZE: usize> Iterator for Query<'a, T, EVENT_SIZE>
+impl<T, const EVENT_SIZE: usize> Iterator for Query<'_, T, EVENT_SIZE>
 where
     T: 'static,
 {
@@ -47,7 +47,7 @@ where
     }
 }
 
-impl<'a, T, const EVENT_SIZE: usize> Drop for Query<'a, T, EVENT_SIZE>
+impl<T, const EVENT_SIZE: usize> Drop for Query<'_, T, EVENT_SIZE>
 where
     T: 'static,
 {
@@ -78,7 +78,7 @@ where
 {
     #[inline]
     /// Creates a new `Query` to iterate over events from type `T`.
-    pub(crate) fn new(events: VecDeque<Event<EVENT_SIZE>>) -> Self {
+    pub(crate) const fn new(events: VecDeque<Event<EVENT_SIZE>>) -> Self {
         Self {
             events,
             _t: PhantomData,

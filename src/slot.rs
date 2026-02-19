@@ -74,14 +74,14 @@ impl<const SIZE: usize> Slot<SIZE> {
         match self {
             // store all events
             Self::All(lock) => {
-                // we have full controll over the lock, there should never be a panick while holding the guard
+                // we have full control over the lock, there should never be a panic while holding the guard
                 let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.push_back(value);
             }
 
             // store only the last
             Self::Last(lock) => {
-                // we have full controll over the lock, there should never be a panick while holding the guard
+                // we have full control over the lock, there should never be a panic while holding the guard
                 let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
 
                 // try to pop the current value
@@ -93,7 +93,7 @@ impl<const SIZE: usize> Slot<SIZE> {
 
             // store only the first
             Self::First(lock) => {
-                // we have full controll over the lock, there should never be a panick while holding the guard
+                // we have full control over the lock, there should never be a panic while holding the guard
                 let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
 
                 // if no event is stored, store input
@@ -104,7 +104,7 @@ impl<const SIZE: usize> Slot<SIZE> {
 
             // use custom compare function
             Self::Cmp { inner, cmp } => {
-                // we have full controll over the lock, there should never be a panick while holding the guard
+                // we have full control over the lock, there should never be a panic while holding the guard
                 let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
 
                 if let Some(curr) = guard.front_mut() {
@@ -123,14 +123,14 @@ impl<const SIZE: usize> Slot<SIZE> {
                     return;
                 }
 
-                // we have full controll over the lock, there should never be a panick while holding the guard
+                // we have full control over the lock, there should never be a panic while holding the guard
                 let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.push_back(value);
             }
 
             // store all events up to specified number
             Self::Max { inner, max } => {
-                // we have full controll over the lock, there should never be a panick while holding the guard
+                // we have full control over the lock, there should never be a panic while holding the guard
                 let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
 
                 if guard.len() == *max {
@@ -144,7 +144,7 @@ impl<const SIZE: usize> Slot<SIZE> {
     }
 
     #[inline]
-    pub fn events(&self) -> MutexGuard<VecDeque<Event<SIZE>>> {
+    pub fn events(&self) -> MutexGuard<'_, VecDeque<Event<SIZE>>> {
         let lock = match self {
             Self::All(lock) | Self::Last(lock) | Self::First(lock) => lock,
             Self::Cmp { inner, cmp: _ }
@@ -152,7 +152,7 @@ impl<const SIZE: usize> Slot<SIZE> {
             | Self::Max { inner, max: _ } => inner,
         };
 
-        // we have full controll over the lock, there should never be a panick while holding the guard
+        // we have full control over the lock, there should never be a panic while holding the guard
         lock.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -165,7 +165,7 @@ impl<const SIZE: usize> Slot<SIZE> {
             | Self::Max { inner, max: _ } => inner,
         };
 
-        // we have full controll over the lock, there should never be a panick while holding the guard
+        // we have full control over the lock, there should never be a panic while holding the guard
         let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
 
         // allocate new buffer
@@ -232,7 +232,7 @@ pub enum SlotType<T: 'static> {
 #[cfg(test)]
 mod tests {
 
-    use crate::{backend::Event, SlotType};
+    use crate::{SlotType, backend::Event};
 
     use super::Slot;
 

@@ -23,6 +23,7 @@ impl<T: 'static, V> EventError<T, V> {
 
 impl<T: 'static> EventError<T, Value> {
     pub fn into_inner(self) -> T {
+        debug_assert!(self.inner.is_some());
         // SAFETY:
         // Unwrapping this value is safe, because it is guaranteed with the marker generic Value,
         // that this Option contains a value.
@@ -41,7 +42,7 @@ impl<T: 'static> EventError<T, Value> {
         }
     }
 
-    pub const fn unregisted_event(value: T) -> Self {
+    pub const fn unregistered_event(value: T) -> Self {
         Self {
             inner: Some(value),
             v: PhantomData,
@@ -137,7 +138,7 @@ impl<T: 'static> std::fmt::Debug for RawErr<T> {
 
 impl<T: 'static> std::fmt::Display for RawErr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = std::any::type_name::<Box<T>>();
+        let name = std::any::type_name::<T>();
 
         match self {
             Self::UnregisteredEventType(_) => {

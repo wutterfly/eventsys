@@ -1,5 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use eventsys::EventBackend;
+use std::hint::black_box;
 
 type Backend = EventBackend<16>;
 
