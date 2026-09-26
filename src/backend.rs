@@ -150,8 +150,10 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
 
         let id = TypeId::of::<T>();
 
-        let map_f = move |event: &Event<EVENT_SIZE>| {
-            let value = event.get_ref::<T>();
+        let map_f = move |value: *const ()| {
+            // SAFETY: Listeners are stored under the `TypeId` of `T` and only get called by `Registered::handle_event`,
+            // which requires `value` to point to a valid `T`.
+            let value = unsafe { &*value.cast::<T>() };
             listener(value);
         };
 
@@ -198,7 +200,8 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
         let id = TypeId::of::<T>();
 
         if let Some(registered) = self.registered.get(&id) {
-            registered.handle_event(Event::new(value));
+            // SAFETY: `registered` was looked up with the `TypeId` of `T`, so it holds the listeners for `T`.
+            unsafe { registered.handle_event(value) };
         } else {
             return Err(EventError::unregistered_event(value));
         }
@@ -427,11 +430,14 @@ impl<const EVENT_SIZE: usize> std::fmt::Debug for EventBackend<EVENT_SIZE> {
     }
 }
 
-type Listener<const SIZE: usize> = Box<dyn Fn(&Event<SIZE>) + Sync + RefUnwindSafe + Send>;
+/// Type-erased event listener. Gets a pointer to the event, that has the type the listener was registered for.
+type Listener = Box<dyn Fn(*const ()) + Sync + RefUnwindSafe + Send>;
 
+/// Aligned to a cache line, so events of different types do not share a cache line (false sharing).
+#[repr(align(64))]
 pub struct Registered<const SIZE: usize> {
     slot: Option<Slot<SIZE>>,
-    listener: Vec<Listener<SIZE>>,
+    listener: Vec<Listener>,
     enabled: AtomicBool,
 }
 
@@ -445,7 +451,14 @@ impl<const SIZE: usize> Registered<SIZE> {
         }
     }
 
-    pub fn handle_event(&self, event: Event<SIZE>) {
+    /// Calls all listeners with the event and stores it, if a slot is registered.
+    ///
+    /// # Safety
+    /// `T` has to be the event type, this `Registered` was registered for.
+    pub unsafe fn handle_event<T>(&self, value: T)
+    where
+        T: Send + RefUnwindSafe + 'static,
+    {
         // check if events for this registered type should be processed
         if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
             return;
@@ -453,12 +466,13 @@ impl<const SIZE: usize> Registered<SIZE> {
 
         // call all listeners
         for listener in &self.listener {
-            _ = std::panic::catch_unwind(|| (listener)(&event));
+            let ptr = std::ptr::from_ref(&value).cast::<()>();
+            _ = std::panic::catch_unwind(|| (listener)(ptr));
         }
 
-        // store event for querying it later
+        // store event for querying it later, only events that get stored need to be wrapped
         if let Some(slot) = &self.slot {
-            slot.push(event);
+            slot.push(Event::new(value));
         }
     }
 

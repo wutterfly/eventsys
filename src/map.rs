@@ -2,66 +2,66 @@ use std::any::TypeId;
 
 use crate::backend::Registered;
 
+/// Maps event types to their registration.
+///
+/// Keys and values are stored in separate vectors, so looking up a type only scans densely packed keys.
 pub struct RegisteredMap<const SIZE: usize> {
-    inner: Vec<(TypeId, Registered<SIZE>)>,
+    keys: Vec<TypeId>,
+    values: Vec<Registered<SIZE>>,
 }
 
 impl<const SIZE: usize> RegisteredMap<SIZE> {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self { inner: Vec::new() }
+        Self {
+            keys: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn position(&self, key: &TypeId) -> Option<usize> {
+        self.keys.iter().position(|k| k == key)
     }
 
     #[inline]
     #[must_use]
     pub fn get(&self, key: &TypeId) -> Option<&Registered<SIZE>> {
-        self.inner.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.position(key).map(|i| &self.values[i])
     }
 
     #[inline]
     #[must_use]
     pub fn get_mut(&mut self, key: &TypeId) -> Option<&mut Registered<SIZE>> {
-        self.inner
-            .iter_mut()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
+        self.position(key).map(|i| &mut self.values[i])
     }
 
     #[inline]
     #[must_use]
     pub fn insert(&mut self, key: TypeId, value: Registered<SIZE>) -> Option<Registered<SIZE>> {
-        let found = self.inner.iter_mut().find(|(k, _)| k == &key);
-
-        if let Some((_, v)) = found {
-            let out = std::mem::replace(v, value);
-
-            Some(out)
+        if let Some(i) = self.position(&key) {
+            Some(std::mem::replace(&mut self.values[i], value))
         } else {
-            self.inner.push((key, value));
+            self.keys.push(key);
+            self.values.push(value);
             None
         }
     }
 
     #[inline]
-    pub fn values<'a>(&'a self) -> impl Iterator<Item = &'a Registered<SIZE>>
-    where
-        TypeId: 'a,
-    {
-        self.inner.iter().map(|(_, v)| v)
+    pub fn values(&self) -> impl Iterator<Item = &Registered<SIZE>> {
+        self.values.iter()
     }
 
     #[inline]
-    pub fn values_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut Registered<SIZE>>
-    where
-        Registered<SIZE>: 'a,
-    {
-        self.inner.iter_mut().map(|(_, v)| v)
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Registered<SIZE>> {
+        self.values.iter_mut()
     }
 
     #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
-        self.inner.len()
+        self.keys.len()
     }
 }

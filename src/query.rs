@@ -45,7 +45,15 @@ where
 
         out.map(Event::get)
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.events.len();
+        (len, Some(len))
+    }
 }
+
+impl<T, const EVENT_SIZE: usize> ExactSizeIterator for Query<'_, T, EVENT_SIZE> where T: 'static {}
 
 impl<T, const EVENT_SIZE: usize> Drop for Query<'_, T, EVENT_SIZE>
 where
@@ -104,6 +112,17 @@ where
 
         out.map(Event::get)
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.events.len();
+        (len, Some(len))
+    }
+}
+
+impl<T, const EVENT_SIZE: usize> ExactSizeIterator for UnblockingQuery<T, EVENT_SIZE> where
+    T: 'static
+{
 }
 
 impl<T, const EVENT_SIZE: usize> Drop for UnblockingQuery<T, EVENT_SIZE>

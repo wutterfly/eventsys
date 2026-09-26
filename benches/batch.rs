@@ -4,56 +4,35 @@ use std::hint::black_box;
 
 type Backend = EventBackend<16>;
 
-#[inline(never)]
-fn raw(event: f64) {
-    _ = black_box(event);
-}
+/// Cost of storing a single event for the slot types with different code paths.
+fn events_slot_types(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_slots");
 
-fn new_event_bench(events: &Backend, value: f64) {
-    events.new_event::<f64>(value).unwrap();
-}
+    let cases: [(&str, SlotType<u64>); 3] = [
+        ("all", SlotType::All),
+        ("first", SlotType::First),
+        ("all_filter", SlotType::AllFilter(|new| new % 2 == 0)),
+    ];
 
-fn new_event_unregistered(events: &Backend, value: f32) {
-    _ = events.new_event::<f32>(value).unwrap_err();
-}
+    for (name, typ) in cases {
+        let mut events = Backend::new();
+        events.register_store::<u64>(typ).unwrap();
 
-fn create_backend() -> Backend {
-    let mut events = Backend::new();
+        group.bench_function(name, |b| {
+            let mut i = 0u64;
 
-    events.register_store::<f64>(SlotType::Max(10_000)).unwrap();
+            b.iter(|| {
+                i = i.wrapping_add(1);
+                events.new_event::<u64>(black_box(i)).unwrap();
 
-    // preallocate some memory
-    for _ in 0..10_000 {
-        events.new_event::<f64>(0.0).unwrap();
+                // drain regularly, so slots that keep everything do not grow without bound
+                if i & 1023 == 0 {
+                    drop(events.query_blocking::<u64>().unwrap());
+                }
+            });
+        });
     }
-
-    // clear buffer
-    events.query_blocking::<f64>().unwrap();
-
-    events
 }
 
-fn events_batch(c: &mut Criterion) {
-    let mut group = c.benchmark_group("batch");
-
-    let events = create_backend();
-
-    group.bench_function("direct function", |b| b.iter(|| black_box(raw(64.0))));
-
-    group.bench_function("event", |b| {
-        b.iter(|| black_box(new_event_bench(&events, 64.0)))
-    });
-
-    // clear buffer
-    events.query_blocking::<f64>().unwrap();
-
-    group.bench_function("event unregistered", |b| {
-        b.iter(|| black_box(new_event_unregistered(&events, 64.0)))
-    });
-
-    // clear buffer
-    events.query_blocking::<f64>().unwrap();
-}
-
-criterion_group!(benches, events_batch);
+criterion_group!(benches, events_slot_types);
 criterion_main!(benches);
