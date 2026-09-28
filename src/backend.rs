@@ -1,6 +1,5 @@
 use std::{
     any::TypeId,
-    collections::VecDeque,
     panic::RefUnwindSafe,
     sync::{MutexGuard, atomic::AtomicBool},
 };
@@ -48,7 +47,7 @@ use crate::{
     err::{EventError, EventSizeError, Value},
     map::RegisteredMap,
     query::{Query, UnblockingQuery},
-    slot::{Slot, SlotType},
+    slot::{Slot, SlotType, Store},
 };
 
 /// System to register events and event listeners as well as dispatch and query events.
@@ -228,7 +227,7 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
     /// }
     /// # }
     /// ```
-    pub fn query<T>(&self) -> Result<UnblockingQuery<T, EVENT_SIZE>, EventError<T>>
+    pub fn query<T>(&self) -> Result<UnblockingQuery<'_, T, EVENT_SIZE>, EventError<T>>
     where
         T: Send + RefUnwindSafe + 'static,
     {
@@ -245,9 +244,9 @@ impl<const EVENT_SIZE: usize> EventBackend<EVENT_SIZE> {
         self.registered.get(&id).map_or_else(
             || Err(EventError::unregisted_event_empty()),
             |registed| {
-                registed.events_clone().map_or_else(
+                registed.slot().map_or_else(
                     || Err(EventError::registered_without_store()),
-                    |events| Ok(UnblockingQuery::new(events)),
+                    |slot| Ok(UnblockingQuery::new(slot)),
                 )
             },
         )
@@ -477,12 +476,12 @@ impl<const SIZE: usize> Registered<SIZE> {
     }
 
     #[inline]
-    pub fn events_clone(&self) -> Option<VecDeque<Event<SIZE>>> {
-        self.slot.as_ref().map(Slot::events_clone)
+    pub const fn slot(&self) -> Option<&Slot<SIZE>> {
+        self.slot.as_ref()
     }
 
     #[inline]
-    pub fn events(&self) -> Option<MutexGuard<'_, VecDeque<Event<SIZE>>>> {
+    pub fn events(&self) -> Option<MutexGuard<'_, Store<SIZE>>> {
         self.slot.as_ref().map(Slot::events)
     }
 

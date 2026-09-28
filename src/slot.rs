@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    ops::{Deref, DerefMut},
     sync::{
         Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -13,45 +14,78 @@ type Cmp<const SIZE: usize> =
 
 type Filter<const SIZE: usize> = Box<dyn Fn(&Event<SIZE>) -> bool + Send + Sync + 'static>;
 
-pub enum Slot<const SIZE: usize> {
-    All(Mutex<VecDeque<Event<SIZE>>>),
-    Last(Mutex<VecDeque<Event<SIZE>>>),
-    First {
-        inner: Mutex<VecDeque<Event<SIZE>>>,
+/// The stored events of a [`Slot`].
+///
+/// Dereferences to the stored events.
+#[derive(Debug)]
+pub struct Store<const SIZE: usize> {
+    events: VecDeque<Event<SIZE>>,
 
-        /// Set, while an event is stored. Lets [`Slot::push`] skip locking, if there is nothing to do.
-        ///
-        /// Only changed while holding the lock of `inner`. Set to `true` when an event gets stored and reset to
-        /// `false` whenever the events get accessed for consumption. That way `true` always means an event is stored.
-        /// `false` is only a hint and gets checked again under the lock.
-        filled: AtomicBool,
-    },
-    Cmp {
-        inner: Mutex<VecDeque<Event<SIZE>>>,
-        cmp: Cmp<SIZE>,
-    },
+    /// Buffer of an already consumed batch, that gets used for the next batch.
+    /// This way batches do not need a new allocation each time.
+    spare: Option<VecDeque<Event<SIZE>>>,
+}
 
-    AllFilter {
-        inner: Mutex<VecDeque<Event<SIZE>>>,
-        filter: Filter<SIZE>,
-    },
-    Max {
-        inner: Mutex<VecDeque<Event<SIZE>>>,
-        max: usize,
-    },
+impl<const SIZE: usize> Store<SIZE> {
+    #[inline]
+    const fn new(events: VecDeque<Event<SIZE>>) -> Self {
+        Self {
+            events,
+            spare: None,
+        }
+    }
+}
+
+impl<const SIZE: usize> Deref for Store<SIZE> {
+    type Target = VecDeque<Event<SIZE>>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+impl<const SIZE: usize> DerefMut for Store<SIZE> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.events
+    }
+}
+
+enum Kind<const SIZE: usize> {
+    All,
+    Last,
+    First,
+    Cmp(Cmp<SIZE>),
+    AllFilter(Filter<SIZE>),
+    Max(usize),
+}
+
+pub struct Slot<const SIZE: usize> {
+    store: Mutex<Store<SIZE>>,
+
+    /// Set, while events are stored. Lets other threads skip locking, if there is nothing to do.
+    ///
+    /// Only changed while holding the lock of `store`. Set to `true` when an event gets stored and reset to `false`
+    /// whenever the events get accessed for consumption. That way `true` always means an event is stored (until the
+    /// events are consumed) and `false` means there is nothing to consume. Consumers always have to remove all events,
+    /// before releasing the lock.
+    ///
+    /// Reading `false` without holding the lock, can miss an event that is stored at the same moment. Such an event
+    /// simply is part of the next batch.
+    filled: AtomicBool,
+
+    kind: Kind<SIZE>,
 }
 
 impl<const SIZE: usize> Slot<SIZE> {
     #[inline]
     #[allow(clippy::needless_pass_by_value)]
     pub fn new<T: 'static>(typ: SlotType<T>) -> Self {
-        match typ {
-            SlotType::All => Self::All(Mutex::new(VecDeque::with_capacity(64))),
-            SlotType::Last => Self::Last(Mutex::new(VecDeque::with_capacity(1))),
-            SlotType::First => Self::First {
-                inner: Mutex::new(VecDeque::with_capacity(1)),
-                filled: AtomicBool::new(false),
-            },
+        let (kind, capacity) = match typ {
+            SlotType::All => (Kind::All, 64),
+            SlotType::Last => (Kind::Last, 1),
+            SlotType::First => (Kind::First, 1),
             SlotType::Cmp(cmp) => {
                 let f = move |current: &Event<SIZE>, new: &Event<SIZE>| {
                     let c = current.get_ref::<T>();
@@ -60,10 +94,7 @@ impl<const SIZE: usize> Slot<SIZE> {
                     cmp(c, n)
                 };
 
-                Self::Cmp {
-                    inner: Mutex::new(VecDeque::with_capacity(1)),
-                    cmp: Box::new(f),
-                }
+                (Kind::Cmp(Box::new(f)), 1)
             }
             SlotType::AllFilter(filter) => {
                 let f = move |new: &Event<SIZE>| {
@@ -72,35 +103,44 @@ impl<const SIZE: usize> Slot<SIZE> {
                     filter(n)
                 };
 
-                Self::AllFilter {
-                    inner: Mutex::new(VecDeque::with_capacity(32)),
-                    filter: Box::new(f),
-                }
+                (Kind::AllFilter(Box::new(f)), 32)
             }
-            SlotType::Max(max) => Self::Max {
-                inner: Mutex::new(VecDeque::with_capacity(max / 2)),
-                max,
-            },
+            SlotType::Max(max) => (Kind::Max(max), max / 2),
+        };
+
+        Self {
+            store: Mutex::new(Store::new(VecDeque::with_capacity(capacity))),
+            filled: AtomicBool::new(false),
+            kind,
         }
     }
 
     #[inline]
-    // `First` must only change `filled` while holding the lock, so its guard has to stay alive until then
+    // `filled` must only change while holding the lock, so the guard has to stay alive until then
     #[allow(clippy::significant_drop_tightening)]
     pub fn push(&self, value: Event<SIZE>) {
-        match self {
+        // check if the event can be discarded, without locking
+        match &self.kind {
+            // an event is already stored, nothing to do
+            Kind::First if self.filled.load(Ordering::Relaxed) => return,
+
+            // use custom filter function
+            Kind::AllFilter(filter) if !filter(&value) => return,
+
+            // nothing can be stored
+            Kind::Max(0) => return,
+
+            _ => {}
+        }
+
+        let mut guard = self.lock();
+
+        match &self.kind {
             // store all events
-            Self::All(lock) => {
-                // we have full control over the lock, there should never be a panic while holding the guard
-                let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.push_back(value);
-            }
+            Kind::All | Kind::AllFilter(_) => guard.push_back(value),
 
             // store only the last
-            Self::Last(lock) => {
-                // we have full control over the lock, there should never be a panic while holding the guard
-                let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-
+            Kind::Last => {
                 // try to pop the current value
                 _ = guard.pop_back();
 
@@ -109,27 +149,15 @@ impl<const SIZE: usize> Slot<SIZE> {
             }
 
             // store only the first
-            Self::First { inner, filled } => {
-                // an event is already stored, nothing to do
-                if filled.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                // we have full control over the lock, there should never be a panic while holding the guard
-                let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-
+            Kind::First => {
                 // if no event is stored, store input
                 if guard.is_empty() {
                     guard.push_front(value);
-                    filled.store(true, Ordering::Relaxed);
                 }
             }
 
             // use custom compare function
-            Self::Cmp { inner, cmp } => {
-                // we have full control over the lock, there should never be a panic while holding the guard
-                let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-
+            Kind::Cmp(cmp) => {
                 if let Some(curr) = guard.front_mut() {
                     // check if value should be replaced
                     if cmp(curr, &value) {
@@ -140,70 +168,58 @@ impl<const SIZE: usize> Slot<SIZE> {
                 }
             }
 
-            // use custom filter function
-            Self::AllFilter { inner, filter: cmp } => {
-                if !cmp(&value) {
-                    return;
-                }
-
-                // we have full control over the lock, there should never be a panic while holding the guard
-                let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.push_back(value);
-            }
-
             // store all events up to specified number
-            Self::Max { inner, max } => {
-                // nothing can be stored
-                if *max == 0 {
-                    return;
-                }
-
-                // we have full control over the lock, there should never be a panic while holding the guard
-                let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-
+            Kind::Max(max) => {
                 if guard.len() >= *max {
                     // remove oldest value
                     guard.pop_front();
                 }
+
                 // put new value in
                 guard.push_back(value);
             }
         }
+
+        self.filled.store(true, Ordering::Relaxed);
     }
 
     #[inline]
-    const fn inner(&self) -> &Mutex<VecDeque<Event<SIZE>>> {
-        match self {
-            Self::All(inner)
-            | Self::Last(inner)
-            | Self::First { inner, filled: _ }
-            | Self::Cmp { inner, cmp: _ }
-            | Self::AllFilter { inner, filter: _ }
-            | Self::Max { inner, max: _ } => inner,
-        }
+    fn lock(&self) -> MutexGuard<'_, Store<SIZE>> {
+        // we have full control over the lock, there should never be a panic while holding the guard
+        self.store.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Locks the stored events, to consume them.
+    ///
+    /// All events have to be removed, before the lock is released.
     #[inline]
-    fn lock_for_consume(&self) -> MutexGuard<'_, VecDeque<Event<SIZE>>> {
-        // we have full control over the lock, there should never be a panic while holding the guard
-        let guard = self.inner().lock().unwrap_or_else(PoisonError::into_inner);
+    fn lock_for_consume(&self) -> MutexGuard<'_, Store<SIZE>> {
+        let guard = self.lock();
 
-        // the events are about to be consumed, `push` has to check again under the lock
-        if let Self::First { filled, inner: _ } = self {
-            filled.store(false, Ordering::Relaxed);
-        }
+        // the events are about to be consumed, `push` and the other consumers have to check again under the lock
+        self.filled.store(false, Ordering::Relaxed);
 
         guard
     }
 
+    /// Locks the stored events, to consume them in place.
+    ///
+    /// All events have to be removed, before the lock is released.
     #[inline]
-    pub fn events(&self) -> MutexGuard<'_, VecDeque<Event<SIZE>>> {
+    pub fn events(&self) -> MutexGuard<'_, Store<SIZE>> {
         self.lock_for_consume()
     }
 
+    /// Takes all stored events out of the slot.
+    ///
+    /// Give the buffer back with [`Slot::recycle`], after all events are consumed.
     #[inline]
     pub fn events_clone(&self) -> VecDeque<Event<SIZE>> {
+        // nothing stored, no need to lock
+        if !self.filled.load(Ordering::Relaxed) {
+            return VecDeque::new();
+        }
+
         let mut guard = self.lock_for_consume();
 
         // nothing to take, keep the current buffer and do not allocate a new one
@@ -211,30 +227,50 @@ impl<const SIZE: usize> Slot<SIZE> {
             return VecDeque::new();
         }
 
-        // allocate new buffer
-        let new = VecDeque::with_capacity(guard.len() / 2);
+        // new buffer for the next batch, that is expected to be about as big as this one
+        let len = guard.len();
+        let new = guard
+            .spare
+            .take()
+            .unwrap_or_else(|| VecDeque::with_capacity(len));
 
         // swap underlying buffer
-        std::mem::replace(&mut *guard, new)
+        std::mem::replace(&mut guard.events, new)
+    }
+
+    /// Hands back the buffer of a consumed batch, to be used for a later batch.
+    #[inline]
+    pub fn recycle(&self, buffer: VecDeque<Event<SIZE>>) {
+        debug_assert!(buffer.is_empty());
+
+        if buffer.capacity() == 0 {
+            return;
+        }
+
+        let mut guard = self.lock();
+        if guard.spare.is_none() {
+            guard.spare = Some(buffer);
+        }
     }
 
     /// Frees all allocated memory.
     #[inline]
     pub fn cleanup(&self) {
         let mut guard = self.lock_for_consume();
-        *guard = VecDeque::new();
+        guard.events = VecDeque::new();
+        guard.spare = None;
     }
 }
 
 impl<const EVENT_SIZE: usize> std::fmt::Debug for Slot<EVENT_SIZE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::All(_) => f.debug_tuple("All").finish(),
-            Self::Last(_) => f.debug_tuple("Last").finish(),
-            Self::First { .. } => f.debug_struct("First").finish(),
-            Self::Cmp { .. } => f.debug_struct("Cmp").finish(),
-            Self::AllFilter { .. } => f.debug_struct("AllFilter").finish(),
-            Self::Max { .. } => f.debug_struct("Max").finish(),
+        match &self.kind {
+            Kind::All => f.debug_tuple("All").finish(),
+            Kind::Last => f.debug_tuple("Last").finish(),
+            Kind::First => f.debug_struct("First").finish(),
+            Kind::Cmp(_) => f.debug_struct("Cmp").finish(),
+            Kind::AllFilter(_) => f.debug_struct("AllFilter").finish(),
+            Kind::Max(_) => f.debug_struct("Max").finish(),
         }
     }
 }
@@ -542,6 +578,127 @@ mod tests {
         let mut query = slot.events();
         assert_eq!(query.len(), 1);
         assert_eq!(query.pop_front().unwrap().get::<u32>(), 1);
+    }
+
+    #[test]
+    fn test_slot_recycle_reuses_buffer() {
+        let slot = Slot::<16>::new::<u32>(SlotType::All);
+
+        for i in 0..10u32 {
+            slot.push(Event::new(i));
+        }
+
+        // take the events, the slot continues with a new buffer
+        let mut taken = slot.events_clone();
+        let capacity = taken.capacity();
+        assert_eq!(taken.len(), 10);
+        assert_ne!(slot.events().capacity(), capacity);
+
+        // give the consumed buffer back
+        taken.clear();
+        slot.recycle(taken);
+
+        // the next batch is taken with the recycled buffer
+        for i in 0..10u32 {
+            slot.push(Event::new(i));
+        }
+        assert_eq!(slot.events_clone().len(), 10);
+        assert_eq!(slot.events().capacity(), capacity);
+    }
+
+    #[test]
+    fn test_slot_recycle_keeps_only_one_buffer() {
+        let slot = Slot::<16>::new::<u32>(SlotType::All);
+
+        for i in 0..10u32 {
+            slot.push(Event::new(i));
+        }
+        let mut first = slot.events_clone();
+        let first_capacity = first.capacity();
+
+        for i in 0..10u32 {
+            slot.push(Event::new(i));
+        }
+        let mut second = slot.events_clone();
+        let second_capacity = second.capacity();
+        assert_ne!(first_capacity, second_capacity);
+
+        first.clear();
+        second.clear();
+        slot.recycle(first);
+        // there already is a spare buffer, this one gets dropped
+        slot.recycle(second);
+
+        for i in 0..10u32 {
+            slot.push(Event::new(i));
+        }
+        drop(slot.events_clone());
+        assert_eq!(slot.events().capacity(), first_capacity);
+    }
+
+    #[test]
+    fn test_slot_recycle_ignores_empty_buffer() {
+        let slot = Slot::<16>::new::<u32>(SlotType::All);
+
+        slot.recycle(std::collections::VecDeque::new());
+
+        for i in 0..10u32 {
+            slot.push(Event::new(i));
+        }
+        assert_eq!(slot.events_clone().len(), 10);
+    }
+
+    #[test]
+    fn test_slot_cleanup_drops_recycled_buffer() {
+        let slot = Slot::<16>::new::<u32>(SlotType::All);
+
+        for i in 0..100u32 {
+            slot.push(Event::new(i));
+        }
+        let mut taken = slot.events_clone();
+        let capacity = taken.capacity();
+        taken.clear();
+        slot.recycle(taken);
+
+        slot.cleanup();
+
+        // the recycled buffer is gone, a new (smaller) one gets allocated
+        for i in 0..3u32 {
+            slot.push(Event::new(i));
+        }
+        drop(slot.events_clone());
+        assert!(slot.events().capacity() < capacity);
+    }
+
+    #[test]
+    fn test_slot_empty_poll_then_push() {
+        let slot = Slot::<16>::new::<u32>(SlotType::All);
+
+        // polling without events does not hide the next event
+        for _ in 0..3 {
+            assert_eq!(slot.events_clone().len(), 0);
+        }
+
+        slot.push(Event::new(1u32));
+
+        let mut taken = slot.events_clone();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken.pop_front().unwrap().get::<u32>(), 1);
+        assert_eq!(slot.events_clone().len(), 0);
+    }
+
+    #[test]
+    fn test_slot_filtered_events_do_not_mark_slot_filled() {
+        let slot = Slot::<16>::new::<u32>(SlotType::AllFilter(|_| false));
+
+        for i in 0..10u32 {
+            slot.push(Event::new(i));
+        }
+
+        // nothing was stored, the buffer stays where it is
+        let capacity = slot.events().capacity();
+        assert_eq!(slot.events_clone().len(), 0);
+        assert_eq!(slot.events().capacity(), capacity);
     }
 
     #[test]

@@ -383,3 +383,135 @@ fn test_batch_first_threads_keep_exactly_one() {
         assert_eq!(events.len(), 1, "round {round}");
     }
 }
+
+#[test]
+fn test_batch_query_many_batches() {
+    let mut system = EventBackend::default();
+    system.register_store::<u32>(SlotType::All).unwrap();
+
+    // batches of different sizes, some are empty, consumed by both kinds of queries
+    let sizes = [0usize, 1, 5, 100, 3, 0, 0, 40, 1, 200, 0, 7];
+
+    for (round, size) in sizes.into_iter().cycle().take(60).enumerate() {
+        let expected = (0..size as u32)
+            .map(|i| i + round as u32)
+            .collect::<Vec<_>>();
+
+        for value in &expected {
+            system.new_event::<u32>(*value).unwrap();
+        }
+
+        let events = if round % 2 == 0 {
+            system.query::<u32>().unwrap().collect::<Vec<_>>()
+        } else {
+            system.query_blocking::<u32>().unwrap().collect::<Vec<_>>()
+        };
+
+        assert_eq!(events, expected, "round {round}");
+    }
+}
+
+#[test]
+fn test_batch_query_partially_consumed_does_not_leak_into_next_batch() {
+    let mut system = EventBackend::default();
+    system.register_store::<u32>(SlotType::All).unwrap();
+
+    for round in 0..10u32 {
+        for i in 0..10 {
+            system.new_event::<u32>(round * 100 + i).unwrap();
+        }
+
+        // only take some of the events, the others get dropped with the query
+        let mut query = system.query::<u32>().unwrap();
+        assert_eq!(query.next(), Some(round * 100));
+        assert_eq!(query.next(), Some(round * 100 + 1));
+        drop(query);
+
+        system.new_event::<u32>(round * 100 + 50).unwrap();
+        assert_eq!(
+            system.query::<u32>().unwrap().collect::<Vec<_>>(),
+            [round * 100 + 50]
+        );
+    }
+}
+
+#[test]
+fn test_batch_two_queries_alive() {
+    let mut system = EventBackend::default();
+    system.register_store::<u32>(SlotType::All).unwrap();
+
+    system.new_event::<u32>(1).unwrap();
+    system.new_event::<u32>(2).unwrap();
+    let first = system.query::<u32>().unwrap();
+
+    system.new_event::<u32>(3).unwrap();
+    system.new_event::<u32>(4).unwrap();
+    let second = system.query::<u32>().unwrap();
+
+    system.new_event::<u32>(5).unwrap();
+
+    // both queries hold their own events, in any order of dropping them
+    assert_eq!(second.collect::<Vec<_>>(), [3, 4]);
+    assert_eq!(first.collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [5]);
+}
+
+#[test]
+fn test_batch_empty_polls_between_events_for_every_slot_type() {
+    let mut system = EventBackend::default();
+    system.register_store::<u8>(SlotType::First).unwrap();
+    system.register_store::<u16>(SlotType::Last).unwrap();
+    system.register_store::<u32>(SlotType::Max(3)).unwrap();
+    system.register_store::<u64>(SlotType::All).unwrap();
+    system
+        .register_store::<i8>(SlotType::Cmp(|current, new| new > current))
+        .unwrap();
+    system
+        .register_store::<i16>(SlotType::AllFilter(|new| *new > 0))
+        .unwrap();
+
+    for round in 1..=5u8 {
+        // polling without events must not hide events that arrive later
+        for _ in 0..3 {
+            assert_eq!(system.query::<u8>().unwrap().len(), 0);
+            assert_eq!(system.query::<u16>().unwrap().len(), 0);
+            assert_eq!(system.query::<u32>().unwrap().len(), 0);
+            assert_eq!(system.query::<u64>().unwrap().len(), 0);
+            assert_eq!(system.query::<i8>().unwrap().len(), 0);
+            assert_eq!(system.query::<i16>().unwrap().len(), 0);
+        }
+
+        for i in 0..5u8 {
+            system.new_event::<u8>(round * 10 + i).unwrap();
+            system.new_event::<u16>(u16::from(round * 10 + i)).unwrap();
+            system.new_event::<u32>(u32::from(round * 10 + i)).unwrap();
+            system.new_event::<u64>(u64::from(round * 10 + i)).unwrap();
+            system.new_event::<i8>((round * 10 + i) as i8).unwrap();
+            system.new_event::<i16>(i16::from(i) - 2).unwrap();
+        }
+
+        let base = round * 10;
+        assert_eq!(system.query::<u8>().unwrap().collect::<Vec<_>>(), [base]);
+        assert_eq!(
+            system.query::<u16>().unwrap().collect::<Vec<_>>(),
+            [u16::from(base + 4)]
+        );
+        assert_eq!(
+            system.query::<u32>().unwrap().collect::<Vec<_>>(),
+            [
+                u32::from(base + 2),
+                u32::from(base + 3),
+                u32::from(base + 4)
+            ]
+        );
+        assert_eq!(
+            system.query::<u64>().unwrap().collect::<Vec<_>>(),
+            (0..5).map(|i| u64::from(base + i)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            system.query::<i8>().unwrap().collect::<Vec<_>>(),
+            [(base + 4) as i8]
+        );
+        assert_eq!(system.query::<i16>().unwrap().collect::<Vec<_>>(), [1, 2]);
+    }
+}

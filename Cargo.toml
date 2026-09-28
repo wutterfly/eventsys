@@ -18,7 +18,7 @@ criterion = { version = "0.8.2", features = [] }
 
 # stable, comparable benchmark results
 [profile.bench]
-inherit = "release"
+inherits = "release"
 lto = "fat"
 codegen-units = 1
 

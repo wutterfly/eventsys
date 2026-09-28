@@ -214,11 +214,14 @@ macro_rules! bus {
             events
         }
 
-        /// One event for every event type.
-        fn bus_fire(events: &Backend, value: u32) {
-            $(
-                events.new_event(Msg::<$n>(value)).unwrap();
-            )*
+        /// One event of the given event type.
+        fn bus_fire(events: &Backend, kind: u32, value: u32) {
+            match kind {
+                $(
+                    $n => events.new_event(Msg::<$n>(value)).unwrap(),
+                )*
+                _ => unreachable!(),
+            }
         }
     };
 }
@@ -226,14 +229,29 @@ macro_rules! bus {
 bus!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
 
 /// Application with many event types, all handled by listeners.
+///
+/// Event types arrive in a pseudo-random order (fixed seed), like in a real event stream. A fixed order would let the
+/// branch predictor learn the whole sequence, which makes the result depend heavily on the code layout.
 fn event_bus(c: &mut Criterion) {
+    const EVENTS: u64 = 16;
+
     let mut group = c.benchmark_group("bus");
 
     let events = bus_backend();
+    let mut rng = 0x2545_F491_u32;
 
-    group.throughput(Throughput::Elements(16));
+    group.throughput(Throughput::Elements(EVENTS));
     group.bench_function("16 types, 2 listeners each", |b| {
-        b.iter(|| bus_fire(&events, black_box(7)));
+        b.iter(|| {
+            for _ in 0..EVENTS {
+                // xorshift32
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+
+                bus_fire(&events, (rng >> 8) & 15, black_box(7));
+            }
+        });
     });
 }
 
