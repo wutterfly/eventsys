@@ -13,7 +13,7 @@ fn test_listeners() {
         let listener = move |event: &u32| {
             state_c.lock().unwrap().push(*event);
         };
-        system.register_listener::<u32>(listener).unwrap();
+        system.register_listener::<u32>(listener);
     }
 
     let state_boxed = Arc::new(Mutex::new(Vec::<Box<str>>::new()));
@@ -23,7 +23,7 @@ fn test_listeners() {
         let listener = move |event: &Box<str>| {
             state_boxed_c.lock().unwrap().push(event.clone());
         };
-        system.register_listener::<Box<str>>(listener).unwrap();
+        system.register_listener::<Box<str>>(listener);
     }
 
     // call  events
@@ -53,7 +53,7 @@ fn test_listeners_multiple() {
         let listener = move |event: &u32| {
             state_c.lock().unwrap().push(event + 10);
         };
-        let count = system.register_listener::<u32>(listener).unwrap();
+        let count = system.register_listener::<u32>(listener);
         assert_eq!(count, 1);
     }
 
@@ -63,7 +63,7 @@ fn test_listeners_multiple() {
         let listener = move |event: &u32| {
             state_c.lock().unwrap().push(event + 20);
         };
-        let count = system.register_listener::<u32>(listener).unwrap();
+        let count = system.register_listener::<u32>(listener);
         assert_eq!(count, 2);
     }
 

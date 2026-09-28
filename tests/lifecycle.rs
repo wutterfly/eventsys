@@ -9,7 +9,7 @@ use eventsys::{EventBackend, SlotType};
 #[test]
 fn test_stored_events_are_alive_until_queried() {
     let mut system = EventBackend::default();
-    system.register_store::<Arc<()>>(SlotType::All).unwrap();
+    system.register_store::<Arc<()>>(SlotType::All);
 
     let probe = Arc::new(());
 
@@ -33,7 +33,7 @@ fn test_stored_events_are_alive_until_queried() {
 #[test]
 fn test_unblocking_query_drops_unconsumed_events() {
     let mut system = EventBackend::default();
-    system.register_store::<Arc<()>>(SlotType::All).unwrap();
+    system.register_store::<Arc<()>>(SlotType::All);
 
     let probe = Arc::new(());
 
@@ -54,7 +54,7 @@ fn test_unblocking_query_drops_unconsumed_events() {
 #[test]
 fn test_replaced_events_are_dropped() {
     let mut system = EventBackend::default();
-    system.register_store::<Arc<()>>(SlotType::Last).unwrap();
+    system.register_store::<Arc<()>>(SlotType::Last);
 
     let probe = Arc::new(());
 
@@ -69,7 +69,7 @@ fn test_replaced_events_are_dropped() {
 #[test]
 fn test_first_slot_drops_rejected_events() {
     let mut system = EventBackend::default();
-    system.register_store::<Arc<()>>(SlotType::First).unwrap();
+    system.register_store::<Arc<()>>(SlotType::First);
 
     let probe = Arc::new(());
 
@@ -84,8 +84,7 @@ fn test_first_slot_drops_rejected_events() {
 fn test_filter_slot_drops_rejected_events() {
     let mut system = EventBackend::default();
     system
-        .register_store::<Arc<()>>(SlotType::AllFilter(|_| false))
-        .unwrap();
+        .register_store::<Arc<()>>(SlotType::AllFilter(|_| false));
 
     let probe = Arc::new(());
 
@@ -99,7 +98,7 @@ fn test_filter_slot_drops_rejected_events() {
 #[test]
 fn test_max_slot_drops_evicted_events() {
     let mut system = EventBackend::default();
-    system.register_store::<Arc<()>>(SlotType::Max(4)).unwrap();
+    system.register_store::<Arc<()>>(SlotType::Max(4));
 
     let probe = Arc::new(());
 
@@ -113,7 +112,7 @@ fn test_max_slot_drops_evicted_events() {
 #[test]
 fn test_disabled_events_are_dropped() {
     let mut system = EventBackend::default();
-    system.register_store::<Arc<()>>(SlotType::All).unwrap();
+    system.register_store::<Arc<()>>(SlotType::All);
     system.disable_all();
 
     let probe = Arc::new(());
@@ -141,7 +140,7 @@ fn test_unregistered_event_is_returned_not_leaked() {
 #[test]
 fn test_cleanup_drops_stored_events() {
     let mut system = EventBackend::default();
-    system.register_store::<Arc<()>>(SlotType::All).unwrap();
+    system.register_store::<Arc<()>>(SlotType::All);
 
     let probe = Arc::new(());
 
@@ -166,8 +165,7 @@ fn test_cleanup_drops_listeners() {
     {
         let probe = probe.clone();
         system
-            .register_listener::<u32>(move |_| _ = &probe)
-            .unwrap();
+            .register_listener::<u32>(move |_| _ = &probe);
     }
     assert_eq!(Arc::strong_count(&probe), 2);
 
@@ -181,7 +179,7 @@ fn test_backend_drop_drops_stored_events() {
 
     {
         let mut system = EventBackend::default();
-        system.register_store::<Arc<()>>(SlotType::All).unwrap();
+        system.register_store::<Arc<()>>(SlotType::All);
 
         for _ in 0..5 {
             system.new_event(probe.clone()).unwrap();
@@ -197,6 +195,6 @@ fn test_cleanup_on_empty_backend() {
     let mut system = EventBackend::default();
     system.cleanup();
 
-    system.register_listener::<u32>(|_| {}).unwrap();
+    system.register_listener::<u32>(|_| {});
     system.cleanup();
 }

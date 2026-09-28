@@ -26,8 +26,8 @@ while registering new event types does need mutable access.
 ### Example Listeners
 ```rust
 use eventsys::EventBackend;
-// create event system, events can be a max size of 16 bytes
-let mut system = EventBackend::<16>::new();
+// create event system
+let mut system = EventBackend::new();
 
 // create listener to be called on event trigger
 let listener = |event: &u32| {
@@ -35,7 +35,7 @@ let listener = |event: &u32| {
 };
 
 // register listener for event type
-system.register_listener::<u32>(listener).unwrap();
+system.register_listener::<u32>(listener);
 
 // trigger event
 system.new_event::<u32>(123);
@@ -44,11 +44,11 @@ system.new_event::<u32>(123);
 ### Example Batching
 ```rust
 use eventsys::{EventBackend, SlotType};
-// create event system, events can be a max size of 16 bytes
-let mut system = EventBackend::<16>::new();
+// create event system
+let mut system = EventBackend::new();
     
 // register listener for event type
-system.register_store::<u32>(SlotType::All).unwrap();
+system.register_store::<u32>(SlotType::All);
 
 // trigger event
 system.new_event::<u32>(123);

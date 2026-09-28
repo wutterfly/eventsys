@@ -14,8 +14,6 @@ impl<T: 'static, V> EventError<T, V> {
     pub const fn raw_err(&self) -> RawErr<T> {
         match self.raw {
             RawErr::UnregisteredEventType(_) => RawErr::UnregisteredEventType(PhantomData),
-            RawErr::EventSize { max, is, t } => RawErr::EventSize { max, is, t },
-
             RawErr::RegisteredWithoutStore => RawErr::RegisteredWithoutStore,
         }
     }
@@ -28,18 +26,6 @@ impl<T: 'static> EventError<T, Value> {
         // Unwrapping this value is safe, because it is guaranteed with the marker generic Value,
         // that this Option contains a value.
         unsafe { self.inner.unwrap_unchecked() }
-    }
-
-    pub const fn event_size(value: T, err: EventSizeError) -> Self {
-        Self {
-            inner: Some(value),
-            raw: RawErr::EventSize {
-                max: err.max,
-                is: err.is,
-                t: PhantomData,
-            },
-            v: PhantomData,
-        }
     }
 
     pub const fn unregistered_event(value: T) -> Self {
@@ -56,18 +42,6 @@ impl<T: 'static> EventError<T, NoValue> {
         Self {
             inner: None,
             raw: RawErr::UnregisteredEventType(PhantomData),
-            v: PhantomData,
-        }
-    }
-
-    pub const fn event_size_empty(raw: EventSizeError) -> Self {
-        Self {
-            inner: None,
-            raw: RawErr::EventSize {
-                max: raw.max,
-                is: raw.is,
-                t: PhantomData,
-            },
             v: PhantomData,
         }
     }
@@ -98,20 +72,9 @@ impl<T: 'static, V> std::fmt::Display for EventError<T, V> {
     }
 }
 
-impl<T: 'static> From<EventSizeError> for EventError<T, NoValue> {
-    fn from(value: EventSizeError) -> Self {
-        Self::event_size_empty(value)
-    }
-}
-
 #[derive(Clone, Copy)]
 pub enum RawErr<T: 'static> {
     UnregisteredEventType(PhantomData<T>),
-    EventSize {
-        max: usize,
-        is: usize,
-        t: PhantomData<T>,
-    },
     RegisteredWithoutStore,
 }
 
@@ -124,12 +87,6 @@ impl<T: 'static> std::fmt::Debug for RawErr<T> {
             Self::UnregisteredEventType(_) => {
                 f.debug_tuple("UnregisteredEventType").field(&name).finish()
             }
-            Self::EventSize { max, is, t: _ } => f
-                .debug_struct("EventSize")
-                .field("max", max)
-                .field("is", is)
-                .field("type", &name)
-                .finish(),
 
             Self::RegisteredWithoutStore => write!(f, "RegisteredWithListener"),
         }
@@ -144,39 +101,10 @@ impl<T: 'static> std::fmt::Display for RawErr<T> {
             Self::UnregisteredEventType(_) => {
                 write!(f, "Unregistered event type: {name}")
             }
-            Self::EventSize { max, is, t: _ } => write!(
-                f,
-                "Input type {name} has incorrect size: max size: {max}  - is: {is}",
-            ),
 
             Self::RegisteredWithoutStore => {
                 write!(f, "Event type was not registered to store events")
             }
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct EventSizeError {
-    max: usize,
-    is: usize,
-}
-
-impl EventSizeError {
-    #[must_use]
-    pub const fn new(max: usize, is: usize) -> Self {
-        Self { max, is }
-    }
-}
-
-impl std::error::Error for EventSizeError {}
-
-impl std::fmt::Display for EventSizeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Input value has incorrect size: max size: {}  - is: {}",
-            self.max, self.is
-        )
     }
 }

@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use eventsys::EventBackend;
 use std::hint::black_box;
 
-type Backend = EventBackend<16>;
+type Backend = EventBackend;
 
 #[inline(never)]
 fn raw(event: f64) {
@@ -18,8 +18,7 @@ fn events_listener_count(c: &mut Criterion) {
 
         for _ in 0..count {
             events
-                .register_listener::<f64>(|event| raw(*event))
-                .unwrap();
+                .register_listener::<f64>(|event| raw(*event));
         }
 
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {

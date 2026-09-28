@@ -7,28 +7,21 @@ use std::{
     },
 };
 
-use crate::backend::Event;
-
-type Cmp<const SIZE: usize> =
-    Box<dyn Fn(&Event<SIZE>, &Event<SIZE>) -> bool + Send + Sync + 'static>;
-
-type Filter<const SIZE: usize> = Box<dyn Fn(&Event<SIZE>) -> bool + Send + Sync + 'static>;
-
 /// The stored events of a [`Slot`].
 ///
 /// Dereferences to the stored events.
 #[derive(Debug)]
-pub struct Store<const SIZE: usize> {
-    events: VecDeque<Event<SIZE>>,
+pub struct Store<T> {
+    events: VecDeque<T>,
 
     /// Buffer of an already consumed batch, that gets used for the next batch.
     /// This way batches do not need a new allocation each time.
-    spare: Option<VecDeque<Event<SIZE>>>,
+    spare: Option<VecDeque<T>>,
 }
 
-impl<const SIZE: usize> Store<SIZE> {
+impl<T> Store<T> {
     #[inline]
-    const fn new(events: VecDeque<Event<SIZE>>) -> Self {
+    const fn new(events: VecDeque<T>) -> Self {
         Self {
             events,
             spare: None,
@@ -36,8 +29,8 @@ impl<const SIZE: usize> Store<SIZE> {
     }
 }
 
-impl<const SIZE: usize> Deref for Store<SIZE> {
-    type Target = VecDeque<Event<SIZE>>;
+impl<T> Deref for Store<T> {
+    type Target = VecDeque<T>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -45,24 +38,24 @@ impl<const SIZE: usize> Deref for Store<SIZE> {
     }
 }
 
-impl<const SIZE: usize> DerefMut for Store<SIZE> {
+impl<T> DerefMut for Store<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.events
     }
 }
 
-enum Kind<const SIZE: usize> {
+enum Kind<T> {
     All,
     Last,
     First,
-    Cmp(Cmp<SIZE>),
-    AllFilter(Filter<SIZE>),
+    Cmp(fn(&T, &T) -> bool),
+    AllFilter(fn(&T) -> bool),
     Max(usize),
 }
 
-pub struct Slot<const SIZE: usize> {
-    store: Mutex<Store<SIZE>>,
+pub struct Slot<T> {
+    store: Mutex<Store<T>>,
 
     /// Set, while events are stored. Lets other threads skip locking, if there is nothing to do.
     ///
@@ -75,36 +68,19 @@ pub struct Slot<const SIZE: usize> {
     /// simply is part of the next batch.
     filled: AtomicBool,
 
-    kind: Kind<SIZE>,
+    kind: Kind<T>,
 }
 
-impl<const SIZE: usize> Slot<SIZE> {
+impl<T> Slot<T> {
     #[inline]
     #[allow(clippy::needless_pass_by_value)]
-    pub fn new<T: 'static>(typ: SlotType<T>) -> Self {
+    pub fn new(typ: SlotType<T>) -> Self {
         let (kind, capacity) = match typ {
             SlotType::All => (Kind::All, 64),
             SlotType::Last => (Kind::Last, 1),
             SlotType::First => (Kind::First, 1),
-            SlotType::Cmp(cmp) => {
-                let f = move |current: &Event<SIZE>, new: &Event<SIZE>| {
-                    let c = current.get_ref::<T>();
-                    let n = new.get_ref::<T>();
-
-                    cmp(c, n)
-                };
-
-                (Kind::Cmp(Box::new(f)), 1)
-            }
-            SlotType::AllFilter(filter) => {
-                let f = move |new: &Event<SIZE>| {
-                    let n = new.get_ref::<T>();
-
-                    filter(n)
-                };
-
-                (Kind::AllFilter(Box::new(f)), 32)
-            }
+            SlotType::Cmp(cmp) => (Kind::Cmp(cmp), 1),
+            SlotType::AllFilter(filter) => (Kind::AllFilter(filter), 32),
             SlotType::Max(max) => (Kind::Max(max), max / 2),
         };
 
@@ -118,7 +94,7 @@ impl<const SIZE: usize> Slot<SIZE> {
     #[inline]
     // `filled` must only change while holding the lock, so the guard has to stay alive until then
     #[allow(clippy::significant_drop_tightening)]
-    pub fn push(&self, value: Event<SIZE>) {
+    pub fn push(&self, value: T) {
         // check if the event can be discarded, without locking
         match &self.kind {
             // an event is already stored, nothing to do
@@ -184,7 +160,7 @@ impl<const SIZE: usize> Slot<SIZE> {
     }
 
     #[inline]
-    fn lock(&self) -> MutexGuard<'_, Store<SIZE>> {
+    fn lock(&self) -> MutexGuard<'_, Store<T>> {
         // we have full control over the lock, there should never be a panic while holding the guard
         self.store.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -193,7 +169,7 @@ impl<const SIZE: usize> Slot<SIZE> {
     ///
     /// All events have to be removed, before the lock is released.
     #[inline]
-    fn lock_for_consume(&self) -> MutexGuard<'_, Store<SIZE>> {
+    fn lock_for_consume(&self) -> MutexGuard<'_, Store<T>> {
         let guard = self.lock();
 
         // the events are about to be consumed, `push` and the other consumers have to check again under the lock
@@ -206,7 +182,7 @@ impl<const SIZE: usize> Slot<SIZE> {
     ///
     /// All events have to be removed, before the lock is released.
     #[inline]
-    pub fn events(&self) -> MutexGuard<'_, Store<SIZE>> {
+    pub fn events(&self) -> MutexGuard<'_, Store<T>> {
         self.lock_for_consume()
     }
 
@@ -214,7 +190,7 @@ impl<const SIZE: usize> Slot<SIZE> {
     ///
     /// Give the buffer back with [`Slot::recycle`], after all events are consumed.
     #[inline]
-    pub fn events_clone(&self) -> VecDeque<Event<SIZE>> {
+    pub fn events_clone(&self) -> VecDeque<T> {
         // nothing stored, no need to lock
         if !self.filled.load(Ordering::Relaxed) {
             return VecDeque::new();
@@ -240,7 +216,7 @@ impl<const SIZE: usize> Slot<SIZE> {
 
     /// Hands back the buffer of a consumed batch, to be used for a later batch.
     #[inline]
-    pub fn recycle(&self, buffer: VecDeque<Event<SIZE>>) {
+    pub fn recycle(&self, buffer: VecDeque<T>) {
         debug_assert!(buffer.is_empty());
 
         if buffer.capacity() == 0 {
@@ -262,22 +238,22 @@ impl<const SIZE: usize> Slot<SIZE> {
     }
 }
 
-impl<const EVENT_SIZE: usize> std::fmt::Debug for Slot<EVENT_SIZE> {
+impl<T> std::fmt::Debug for Slot<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
-            Kind::All => f.debug_tuple("All").finish(),
-            Kind::Last => f.debug_tuple("Last").finish(),
-            Kind::First => f.debug_struct("First").finish(),
-            Kind::Cmp(_) => f.debug_struct("Cmp").finish(),
-            Kind::AllFilter(_) => f.debug_struct("AllFilter").finish(),
-            Kind::Max(_) => f.debug_struct("Max").finish(),
+            Kind::All => f.debug_tuple("All").finish_non_exhaustive(),
+            Kind::Last => f.debug_tuple("Last").finish_non_exhaustive(),
+            Kind::First => f.debug_struct("First").finish_non_exhaustive(),
+            Kind::Cmp(_) => f.debug_struct("Cmp").finish_non_exhaustive(),
+            Kind::AllFilter(_) => f.debug_struct("AllFilter").finish_non_exhaustive(),
+            Kind::Max(_) => f.debug_struct("Max").finish_non_exhaustive(),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 /// Specifies what events get stored.
-pub enum SlotType<T: 'static> {
+pub enum SlotType<T> {
     /// All events of the matching type get stored.
     All,
 
@@ -304,23 +280,23 @@ pub enum SlotType<T: 'static> {
 #[cfg(test)]
 mod tests {
 
-    use crate::{SlotType, backend::Event};
+    use crate::SlotType;
 
     use super::Slot;
 
     #[test]
     fn test_slot_all() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut values = Vec::with_capacity(100);
 
         let mut query = slot.events();
         while let Some(e) = query.pop_front() {
-            values.push(e.get::<u32>());
+            values.push(e);
         }
 
         assert_eq!(values, (0..100).collect::<Vec<_>>());
@@ -328,17 +304,17 @@ mod tests {
 
     #[test]
     fn test_slot_first() {
-        let slot = Slot::<16>::new::<u32>(SlotType::First);
+        let slot = Slot::new(SlotType::First);
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut values = Vec::with_capacity(1);
 
         let mut query = slot.events();
         while let Some(e) = query.pop_front() {
-            values.push(e.get::<u32>());
+            values.push(e);
         }
 
         let first = values.pop().unwrap();
@@ -348,17 +324,17 @@ mod tests {
 
     #[test]
     fn test_slot_last() {
-        let slot = Slot::<16>::new::<u32>(SlotType::Last);
+        let slot = Slot::new(SlotType::Last);
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut values = Vec::with_capacity(1);
 
         let mut query = slot.events();
         while let Some(e) = query.pop_front() {
-            values.push(e.get::<u32>());
+            values.push(e);
         }
 
         let last = values.pop().unwrap();
@@ -368,17 +344,17 @@ mod tests {
 
     #[test]
     fn test_slot_cmp() {
-        let slot = Slot::<16>::new::<u32>(SlotType::Cmp(|current, next| *next > 2 * current));
+        let slot = Slot::new(SlotType::Cmp(|current, next| *next > 2 * current));
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut values = Vec::with_capacity(1);
 
         let mut query = slot.events();
         while let Some(e) = query.pop_front() {
-            values.push(e.get::<u32>());
+            values.push(e);
         }
 
         let last = values.pop().unwrap();
@@ -388,17 +364,17 @@ mod tests {
 
     #[test]
     fn test_slot_filter() {
-        let slot = Slot::<16>::new::<u32>(SlotType::AllFilter(|next| *next >= 50));
+        let slot = Slot::new(SlotType::AllFilter(|next| *next >= 50));
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut values = Vec::with_capacity(1);
 
         let mut query = slot.events();
         while let Some(e) = query.pop_front() {
-            values.push(e.get::<u32>());
+            values.push(e);
         }
 
         assert_eq!(values, (50..100).collect::<Vec<_>>());
@@ -407,17 +383,17 @@ mod tests {
 
     #[test]
     fn test_slot_max() {
-        let slot = Slot::<16>::new::<u32>(SlotType::Max(100));
+        let slot = Slot::new(SlotType::Max(100));
 
         for i in 0..200u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut values = Vec::with_capacity(100);
 
         let mut query = slot.events();
         while let Some(e) = query.pop_front() {
-            values.push(e.get::<u32>());
+            values.push(e);
         }
 
         assert_eq!(values, (100..200).collect::<Vec<_>>());
@@ -426,10 +402,10 @@ mod tests {
 
     #[test]
     fn test_slot_max_zero() {
-        let slot = Slot::<16>::new::<u32>(SlotType::Max(0));
+        let slot = Slot::new(SlotType::Max(0));
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         assert_eq!(slot.events().len(), 0);
@@ -437,37 +413,37 @@ mod tests {
 
     #[test]
     fn test_slot_max_one() {
-        let slot = Slot::<16>::new::<u32>(SlotType::Max(1));
+        let slot = Slot::new(SlotType::Max(1));
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut query = slot.events();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap().get::<u32>(), 99);
+        assert_eq!(query.pop_front().unwrap(), 99);
     }
 
     #[test]
     fn test_slot_cmp_first_event_is_always_stored() {
         // compare function never accepts a replacement
-        let slot = Slot::<16>::new::<u32>(SlotType::Cmp(|_, _| false));
+        let slot = Slot::new(SlotType::Cmp(|_, _| false));
 
         for i in 5..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let mut query = slot.events();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap().get::<u32>(), 5);
+        assert_eq!(query.pop_front().unwrap(), 5);
     }
 
     #[test]
     fn test_slot_filter_rejects_all() {
-        let slot = Slot::<16>::new::<u32>(SlotType::AllFilter(|_| false));
+        let slot = Slot::new(SlotType::AllFilter(|_| false));
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         assert_eq!(slot.events().len(), 0);
@@ -475,39 +451,39 @@ mod tests {
 
     #[test]
     fn test_slot_events_clone_takes_events() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         let taken = slot.events_clone();
-        let values = taken.into_iter().map(Event::get::<u32>).collect::<Vec<_>>();
+        let values = taken.into_iter().collect::<Vec<_>>();
         assert_eq!(values, (0..10).collect::<Vec<_>>());
 
         // slot is empty afterwards, but still usable
         assert_eq!(slot.events().len(), 0);
 
-        slot.push(Event::new(10u32));
+        slot.push(10u32);
         assert_eq!(slot.events().len(), 1);
     }
 
     #[test]
     fn test_slot_events_clone_empty() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         assert_eq!(slot.events_clone().len(), 0);
 
-        slot.push(Event::new(1u32));
+        slot.push(1u32);
         assert_eq!(slot.events().len(), 1);
     }
 
     #[test]
     fn test_slot_events_clone_keeps_capacity() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         drop(slot.events_clone());
@@ -518,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_slot_events_clone_empty_keeps_buffer() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::<u32>::new(SlotType::All);
         let capacity = slot.events().capacity();
         assert!(capacity > 0);
 
@@ -531,61 +507,61 @@ mod tests {
 
     #[test]
     fn test_slot_first_rejects_while_filled() {
-        let slot = Slot::<16>::new::<u32>(SlotType::First);
+        let slot = Slot::new(SlotType::First);
 
-        slot.push(Event::new(1u32));
-        slot.push(Event::new(2u32));
+        slot.push(1u32);
+        slot.push(2u32);
 
         let mut query = slot.events();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap().get::<u32>(), 1);
+        assert_eq!(query.pop_front().unwrap(), 1);
     }
 
     #[test]
     fn test_slot_first_accepts_after_consume() {
-        let slot = Slot::<16>::new::<u32>(SlotType::First);
+        let slot = Slot::new(SlotType::First);
 
-        slot.push(Event::new(1u32));
+        slot.push(1u32);
 
         // consumed with events()
-        drop(slot.events().pop_front());
-        slot.push(Event::new(2u32));
-        assert_eq!(slot.events().pop_front().unwrap().get::<u32>(), 2);
+        _ = slot.events().pop_front();
+        slot.push(2u32);
+        assert_eq!(slot.events().pop_front().unwrap(), 2);
 
         // consumed with events_clone()
-        slot.push(Event::new(3u32));
+        slot.push(3u32);
         drop(slot.events_clone());
-        slot.push(Event::new(4u32));
-        assert_eq!(slot.events().pop_front().unwrap().get::<u32>(), 4);
+        slot.push(4u32);
+        assert_eq!(slot.events().pop_front().unwrap(), 4);
 
         // consumed with cleanup()
-        slot.push(Event::new(5u32));
+        slot.push(5u32);
         slot.cleanup();
-        slot.push(Event::new(6u32));
-        assert_eq!(slot.events().pop_front().unwrap().get::<u32>(), 6);
+        slot.push(6u32);
+        assert_eq!(slot.events().pop_front().unwrap(), 6);
     }
 
     #[test]
     fn test_slot_first_stays_filled_if_not_consumed() {
-        let slot = Slot::<16>::new::<u32>(SlotType::First);
+        let slot = Slot::new(SlotType::First);
 
-        slot.push(Event::new(1u32));
+        slot.push(1u32);
 
         // accessing the events without taking them out, must not make room for a new event
         drop(slot.events());
-        slot.push(Event::new(2u32));
+        slot.push(2u32);
 
         let mut query = slot.events();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap().get::<u32>(), 1);
+        assert_eq!(query.pop_front().unwrap(), 1);
     }
 
     #[test]
     fn test_slot_recycle_reuses_buffer() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         // take the events, the slot continues with a new buffer
@@ -600,7 +576,7 @@ mod tests {
 
         // the next batch is taken with the recycled buffer
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
         assert_eq!(slot.events_clone().len(), 10);
         assert_eq!(slot.events().capacity(), capacity);
@@ -608,16 +584,16 @@ mod tests {
 
     #[test]
     fn test_slot_recycle_keeps_only_one_buffer() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
         let mut first = slot.events_clone();
         let first_capacity = first.capacity();
 
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
         let mut second = slot.events_clone();
         let second_capacity = second.capacity();
@@ -630,7 +606,7 @@ mod tests {
         slot.recycle(second);
 
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
         drop(slot.events_clone());
         assert_eq!(slot.events().capacity(), first_capacity);
@@ -638,22 +614,22 @@ mod tests {
 
     #[test]
     fn test_slot_recycle_ignores_empty_buffer() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         slot.recycle(std::collections::VecDeque::new());
 
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
         assert_eq!(slot.events_clone().len(), 10);
     }
 
     #[test]
     fn test_slot_cleanup_drops_recycled_buffer() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
         let mut taken = slot.events_clone();
         let capacity = taken.capacity();
@@ -664,7 +640,7 @@ mod tests {
 
         // the recycled buffer is gone, a new (smaller) one gets allocated
         for i in 0..3u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
         drop(slot.events_clone());
         assert!(slot.events().capacity() < capacity);
@@ -672,27 +648,27 @@ mod tests {
 
     #[test]
     fn test_slot_empty_poll_then_push() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         // polling without events does not hide the next event
         for _ in 0..3 {
             assert_eq!(slot.events_clone().len(), 0);
         }
 
-        slot.push(Event::new(1u32));
+        slot.push(1u32);
 
         let mut taken = slot.events_clone();
         assert_eq!(taken.len(), 1);
-        assert_eq!(taken.pop_front().unwrap().get::<u32>(), 1);
+        assert_eq!(taken.pop_front().unwrap(), 1);
         assert_eq!(slot.events_clone().len(), 0);
     }
 
     #[test]
     fn test_slot_filtered_events_do_not_mark_slot_filled() {
-        let slot = Slot::<16>::new::<u32>(SlotType::AllFilter(|_| false));
+        let slot = Slot::new(SlotType::AllFilter(|_| false));
 
         for i in 0..10u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         // nothing was stored, the buffer stays where it is
@@ -703,17 +679,17 @@ mod tests {
 
     #[test]
     fn test_slot_cleanup() {
-        let slot = Slot::<16>::new::<u32>(SlotType::All);
+        let slot = Slot::new(SlotType::All);
 
         for i in 0..100u32 {
-            slot.push(Event::new(i));
+            slot.push(i);
         }
 
         slot.cleanup();
         assert_eq!(slot.events().len(), 0);
         assert_eq!(slot.events().capacity(), 0);
 
-        slot.push(Event::new(1u32));
+        slot.push(1u32);
         assert_eq!(slot.events().len(), 1);
     }
 }

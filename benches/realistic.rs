@@ -51,19 +51,15 @@ struct Telemetry(u64);
 fn frame_backend() -> Backend {
     let mut events = Backend::new();
 
-    events.register_store::<MouseMove>(SlotType::Last).unwrap();
-    events.register_store::<MouseButton>(SlotType::All).unwrap();
-    events.register_store::<Key>(SlotType::All).unwrap();
-    events.register_store::<Scroll>(SlotType::Max(8)).unwrap();
-    events.register_store::<Resize>(SlotType::Last).unwrap();
-    events
-        .register_store::<Redraw>(SlotType::AllFilter(|redraw| redraw.dirty))
-        .unwrap();
+    events.register_store::<MouseMove>(SlotType::Last);
+    events.register_store::<MouseButton>(SlotType::All);
+    events.register_store::<Key>(SlotType::All);
+    events.register_store::<Scroll>(SlotType::Max(8));
+    events.register_store::<Resize>(SlotType::Last);
+    events.register_store::<Redraw>(SlotType::AllFilter(|redraw| redraw.dirty));
 
     // statistics are handled immediately
-    events
-        .register_listener::<Telemetry>(|event| _ = black_box(event.0))
-        .unwrap();
+    events.register_listener::<Telemetry>(|event| _ = black_box(event.0));
 
     events
 }
@@ -204,11 +200,9 @@ macro_rules! bus {
 
             $(
                 events
-                    .register_listener::<Msg<$n>>(|event| _ = black_box(event.0))
-                    .unwrap();
+                    .register_listener::<Msg<$n>>(|event| _ = black_box(event.0));
                 events
-                    .register_listener::<Msg<$n>>(|event| _ = black_box(event.0 + 1))
-                    .unwrap();
+                    .register_listener::<Msg<$n>>(|event| _ = black_box(event.0 + 1));
             )*
 
             events
@@ -275,14 +269,12 @@ fn pipeline(c: &mut Criterion) {
     group.throughput(Throughput::Elements(PRODUCERS * SAMPLES));
 
     let mut events = Backend::new();
-    events.register_store::<Sample>(SlotType::All).unwrap();
+    events.register_store::<Sample>(SlotType::All);
     // only the latest ticks matter, every tick also gets counted immediately
-    events.register_store::<Tick>(SlotType::Max(64)).unwrap();
-    events
-        .register_listener::<Tick>(|tick| {
-            _ = TICKS.fetch_add(black_box(tick.0) & 1, Ordering::Relaxed)
-        })
-        .unwrap();
+    events.register_store::<Tick>(SlotType::Max(64));
+    events.register_listener::<Tick>(|tick| {
+        _ = TICKS.fetch_add(black_box(tick.0) & 1, Ordering::Relaxed)
+    });
 
     group.bench_function("4 producers, 1 consumer", |b| {
         b.iter(|| {

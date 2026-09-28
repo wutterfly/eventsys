@@ -2,7 +2,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use eventsys::{EventBackend, SlotType};
 use std::hint::black_box;
 
-type Backend = EventBackend<16>;
+type Backend = EventBackend;
 
 /// Cost of storing a single event for the slot types with different code paths.
 fn events_slot_types(c: &mut Criterion) {
@@ -16,7 +16,7 @@ fn events_slot_types(c: &mut Criterion) {
 
     for (name, typ) in cases {
         let mut events = Backend::new();
-        events.register_store::<u64>(typ).unwrap();
+        events.register_store::<u64>(typ);
 
         group.bench_function(name, |b| {
             let mut i = 0u64;

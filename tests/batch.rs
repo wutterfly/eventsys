@@ -6,20 +6,16 @@ fn test_batch() {
 
     // Register events
     system
-        .register_store::<Box<(i32, i32, i32)>>(SlotType::All)
-        .unwrap();
+        .register_store::<Box<(i32, i32, i32)>>(SlotType::All);
     system
-        .register_store::<(i64, u64)>(SlotType::First)
-        .unwrap();
-    system.register_store::<u128>(SlotType::Last).unwrap();
+        .register_store::<(i64, u64)>(SlotType::First);
+    system.register_store::<u128>(SlotType::Last);
 
     system
-        .register_store::<u32>(SlotType::Cmp(|current, next| *next > 2 * current))
-        .unwrap();
+        .register_store::<u32>(SlotType::Cmp(|current, next| *next > 2 * current));
 
     system
-        .register_store::<u64>(SlotType::AllFilter(|next| *next >= 50))
-        .unwrap();
+        .register_store::<u64>(SlotType::AllFilter(|next| *next >= 50));
 
     // call all events
     system
@@ -85,7 +81,7 @@ fn test_batch() {
 fn test_batch_max() {
     let mut system = EventBackend::default();
 
-    system.register_store::<u32>(SlotType::Max(3)).unwrap();
+    system.register_store::<u32>(SlotType::Max(3));
 
     for i in 0..10u32 {
         system.new_event::<u32>(i).unwrap();
@@ -100,7 +96,7 @@ fn test_batch_max() {
 fn test_batch_max_not_reached() {
     let mut system = EventBackend::default();
 
-    system.register_store::<u32>(SlotType::Max(100)).unwrap();
+    system.register_store::<u32>(SlotType::Max(100));
 
     for i in 0..5u32 {
         system.new_event::<u32>(i).unwrap();
@@ -114,7 +110,7 @@ fn test_batch_max_not_reached() {
 fn test_batch_max_one() {
     let mut system = EventBackend::default();
 
-    system.register_store::<u32>(SlotType::Max(1)).unwrap();
+    system.register_store::<u32>(SlotType::Max(1));
 
     for i in 0..10u32 {
         system.new_event::<u32>(i).unwrap();
@@ -128,7 +124,7 @@ fn test_batch_max_one() {
 fn test_batch_max_zero_stores_nothing() {
     let mut system = EventBackend::default();
 
-    system.register_store::<u32>(SlotType::Max(0)).unwrap();
+    system.register_store::<u32>(SlotType::Max(0));
 
     for i in 0..10u32 {
         system.new_event::<u32>(i).unwrap();
@@ -142,7 +138,7 @@ fn test_batch_max_zero_stores_nothing() {
 #[test]
 fn test_batch_query_drains() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
@@ -163,7 +159,7 @@ fn test_batch_query_drains() {
 #[test]
 fn test_batch_query_unblocking() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
@@ -187,12 +183,11 @@ fn test_batch_query_unblocking() {
 fn test_batch_query_unblocking_slot_types() {
     let mut system = EventBackend::default();
 
-    system.register_store::<u8>(SlotType::First).unwrap();
-    system.register_store::<u16>(SlotType::Last).unwrap();
-    system.register_store::<u32>(SlotType::Max(2)).unwrap();
+    system.register_store::<u8>(SlotType::First);
+    system.register_store::<u16>(SlotType::Last);
+    system.register_store::<u32>(SlotType::Max(2));
     system
-        .register_store::<u64>(SlotType::AllFilter(|new| new % 2 == 0))
-        .unwrap();
+        .register_store::<u64>(SlotType::AllFilter(|new| new % 2 == 0));
 
     for i in 1..=5 {
         system.new_event::<u8>(i).unwrap();
@@ -210,8 +205,8 @@ fn test_batch_query_unblocking_slot_types() {
 #[test]
 fn test_batch_first_and_last_after_drain() {
     let mut system = EventBackend::default();
-    system.register_store::<u8>(SlotType::First).unwrap();
-    system.register_store::<u16>(SlotType::Last).unwrap();
+    system.register_store::<u8>(SlotType::First);
+    system.register_store::<u16>(SlotType::Last);
 
     system.new_event::<u8>(1).unwrap();
     system.new_event::<u8>(2).unwrap();
@@ -234,8 +229,8 @@ fn test_batch_first_and_last_after_drain() {
 #[test]
 fn test_batch_types_are_independent() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
-    system.register_store::<i32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
+    system.register_store::<i32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<i32>(-1).unwrap();
@@ -249,12 +244,12 @@ fn test_batch_types_are_independent() {
 fn test_batch_register_store_replaces_slot() {
     let mut system = EventBackend::default();
 
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
 
     // registering again swaps the slot, previously stored events are discarded
-    system.register_store::<u32>(SlotType::Last).unwrap();
+    system.register_store::<u32>(SlotType::Last);
     system.new_event::<u32>(3).unwrap();
     system.new_event::<u32>(4).unwrap();
 
@@ -262,10 +257,10 @@ fn test_batch_register_store_replaces_slot() {
 }
 
 #[test]
-fn test_batch_large_types_are_boxed_automatically() {
-    // 16 bytes per event, but the type itself is a lot bigger
-    let mut system = EventBackend::<16>::new();
-    system.register_store::<[u64; 32]>(SlotType::All).unwrap();
+fn test_batch_large_types() {
+    // there is no size restriction on events
+    let mut system = EventBackend::new();
+    system.register_store::<[u64; 32]>(SlotType::All);
 
     system.new_event::<[u64; 32]>([1; 32]).unwrap();
     system.new_event::<[u64; 32]>([2; 32]).unwrap();
@@ -277,8 +272,8 @@ fn test_batch_large_types_are_boxed_automatically() {
 #[test]
 fn test_batch_heap_types() {
     let mut system = EventBackend::default();
-    system.register_store::<String>(SlotType::All).unwrap();
-    system.register_store::<Vec<u32>>(SlotType::All).unwrap();
+    system.register_store::<String>(SlotType::All);
+    system.register_store::<Vec<u32>>(SlotType::All);
 
     system.new_event::<String>("hello".to_owned()).unwrap();
     system.new_event::<String>("world".to_owned()).unwrap();
@@ -297,7 +292,7 @@ fn test_batch_heap_types() {
 #[test]
 fn test_batch_query_size_hint() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     for i in 0..5u32 {
         system.new_event::<u32>(i).unwrap();
@@ -328,7 +323,7 @@ fn test_batch_query_size_hint() {
 #[test]
 fn test_batch_first_accepts_new_event_after_every_kind_of_drain() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::First).unwrap();
+    system.register_store::<u32>(SlotType::First);
 
     // drained by query_blocking
     system.new_event::<u32>(1).unwrap();
@@ -363,8 +358,8 @@ fn test_batch_first_threads_keep_exactly_one() {
     const THREADS: u32 = 8;
     const PER_THREAD: u32 = 1_000;
 
-    let mut system = EventBackend::<16>::new();
-    system.register_store::<u32>(SlotType::First).unwrap();
+    let mut system = EventBackend::new();
+    system.register_store::<u32>(SlotType::First);
 
     for round in 0..3 {
         std::thread::scope(|s| {
@@ -387,7 +382,7 @@ fn test_batch_first_threads_keep_exactly_one() {
 #[test]
 fn test_batch_query_many_batches() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     // batches of different sizes, some are empty, consumed by both kinds of queries
     let sizes = [0usize, 1, 5, 100, 3, 0, 0, 40, 1, 200, 0, 7];
@@ -414,7 +409,7 @@ fn test_batch_query_many_batches() {
 #[test]
 fn test_batch_query_partially_consumed_does_not_leak_into_next_batch() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     for round in 0..10u32 {
         for i in 0..10 {
@@ -438,7 +433,7 @@ fn test_batch_query_partially_consumed_does_not_leak_into_next_batch() {
 #[test]
 fn test_batch_two_queries_alive() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
@@ -459,16 +454,14 @@ fn test_batch_two_queries_alive() {
 #[test]
 fn test_batch_empty_polls_between_events_for_every_slot_type() {
     let mut system = EventBackend::default();
-    system.register_store::<u8>(SlotType::First).unwrap();
-    system.register_store::<u16>(SlotType::Last).unwrap();
-    system.register_store::<u32>(SlotType::Max(3)).unwrap();
-    system.register_store::<u64>(SlotType::All).unwrap();
+    system.register_store::<u8>(SlotType::First);
+    system.register_store::<u16>(SlotType::Last);
+    system.register_store::<u32>(SlotType::Max(3));
+    system.register_store::<u64>(SlotType::All);
     system
-        .register_store::<i8>(SlotType::Cmp(|current, new| new > current))
-        .unwrap();
+        .register_store::<i8>(SlotType::Cmp(|current, new| new > current));
     system
-        .register_store::<i16>(SlotType::AllFilter(|new| *new > 0))
-        .unwrap();
+        .register_store::<i16>(SlotType::AllFilter(|new| *new > 0));
 
     for round in 1..=5u8 {
         // polling without events must not hide events that arrive later

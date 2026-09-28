@@ -1,32 +1,18 @@
 use std::{collections::VecDeque, marker::PhantomData, sync::MutexGuard};
 
-use crate::{
-    backend::Event,
-    slot::{Slot, Store},
-};
+use crate::slot::{Slot, Store};
 
 #[derive(Debug)]
 /// An iterator over events from type `T`.
-pub struct Query<'a, T, const EVENT_SIZE: usize>
-where
-    T: 'static,
-{
-    events: MutexGuard<'a, Store<EVENT_SIZE>>,
-
-    _t: PhantomData<T>,
+pub struct Query<'a, T> {
+    events: MutexGuard<'a, Store<T>>,
 }
 
-impl<'a, T, const EVENT_SIZE: usize> Query<'a, T, EVENT_SIZE>
-where
-    T: 'static,
-{
+impl<'a, T> Query<'a, T> {
     /// Creates a new `Query` to iterate over events from type `T`.
     #[inline]
-    pub(crate) const fn new(events: MutexGuard<'a, Store<EVENT_SIZE>>) -> Self {
-        Self {
-            events,
-            _t: PhantomData,
-        }
+    pub(crate) const fn new(events: MutexGuard<'a, Store<T>>) -> Self {
+        Self { events }
     }
 
     #[inline]
@@ -36,17 +22,12 @@ where
     }
 }
 
-impl<T, const EVENT_SIZE: usize> Iterator for Query<'_, T, EVENT_SIZE>
-where
-    T: 'static,
-{
+impl<T> Iterator for Query<'_, T> {
     type Item = T;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let out = self.events.pop_front();
-
-        out.map(Event::get)
+        self.events.pop_front()
     }
 
     #[inline]
@@ -56,12 +37,9 @@ where
     }
 }
 
-impl<T, const EVENT_SIZE: usize> ExactSizeIterator for Query<'_, T, EVENT_SIZE> where T: 'static {}
+impl<T> ExactSizeIterator for Query<'_, T> {}
 
-impl<T, const EVENT_SIZE: usize> Drop for Query<'_, T, EVENT_SIZE>
-where
-    T: 'static,
-{
+impl<T> Drop for Query<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.events.clear();
@@ -74,25 +52,19 @@ where
 
 #[derive(Debug)]
 /// An iterator over events from type `T`.
-pub struct UnblockingQuery<'a, T, const EVENT_SIZE: usize>
-where
-    T: 'static,
-{
-    events: VecDeque<Event<EVENT_SIZE>>,
+pub struct UnblockingQuery<'a, T> {
+    events: VecDeque<T>,
 
     /// The slot the events were taken from. Gets the buffer back, after all events are consumed.
-    slot: &'a Slot<EVENT_SIZE>,
+    slot: &'a Slot<T>,
 
     _t: PhantomData<T>,
 }
 
-impl<'a, T, const EVENT_SIZE: usize> UnblockingQuery<'a, T, EVENT_SIZE>
-where
-    T: 'static,
-{
+impl<'a, T> UnblockingQuery<'a, T> {
     #[inline]
     /// Creates a new `Query` to iterate over the events, that are currently stored in the slot.
-    pub(crate) fn new(slot: &'a Slot<EVENT_SIZE>) -> Self {
+    pub(crate) fn new(slot: &'a Slot<T>) -> Self {
         Self {
             events: slot.events_clone(),
             slot,
@@ -107,17 +79,12 @@ where
     }
 }
 
-impl<T, const EVENT_SIZE: usize> Iterator for UnblockingQuery<'_, T, EVENT_SIZE>
-where
-    T: 'static,
-{
+impl<T> Iterator for UnblockingQuery<'_, T> {
     type Item = T;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let out = self.events.pop_front();
-
-        out.map(Event::get)
+        self.events.pop_front()
     }
 
     #[inline]
@@ -127,15 +94,9 @@ where
     }
 }
 
-impl<T, const EVENT_SIZE: usize> ExactSizeIterator for UnblockingQuery<'_, T, EVENT_SIZE> where
-    T: 'static
-{
-}
+impl<T> ExactSizeIterator for UnblockingQuery<'_, T> {}
 
-impl<T, const EVENT_SIZE: usize> Drop for UnblockingQuery<'_, T, EVENT_SIZE>
-where
-    T: 'static,
-{
+impl<T> Drop for UnblockingQuery<'_, T> {
     #[inline]
     fn drop(&mut self) {
         // drop all events that were not consumed

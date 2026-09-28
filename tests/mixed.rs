@@ -13,10 +13,9 @@ fn test_listener_and_store_on_same_type() {
     {
         let seen = seen.clone();
         system
-            .register_listener::<u32>(move |event| seen.lock().unwrap().push(*event))
-            .unwrap();
+            .register_listener::<u32>(move |event| seen.lock().unwrap().push(*event));
     }
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
@@ -32,14 +31,13 @@ fn test_listener_and_store_on_same_type() {
 fn test_store_registered_before_listener() {
     let mut system = EventBackend::default();
 
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     let count = Arc::new(AtomicUsize::new(0));
     {
         let count = count.clone();
         let n = system
-            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed))
-            .unwrap();
+            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
         assert_eq!(n, 1);
     }
 
@@ -53,10 +51,10 @@ fn test_store_registered_before_listener() {
 fn test_listener_count_is_per_type() {
     let mut system = EventBackend::default();
 
-    assert_eq!(system.register_listener::<u32>(|_| {}).unwrap(), 1);
-    assert_eq!(system.register_listener::<u32>(|_| {}).unwrap(), 2);
-    assert_eq!(system.register_listener::<i32>(|_| {}).unwrap(), 1);
-    assert_eq!(system.register_listener::<u32>(|_| {}).unwrap(), 3);
+    assert_eq!(system.register_listener::<u32>(|_| {}), 1);
+    assert_eq!(system.register_listener::<u32>(|_| {}), 2);
+    assert_eq!(system.register_listener::<i32>(|_| {}), 1);
+    assert_eq!(system.register_listener::<u32>(|_| {}), 3);
 }
 
 #[test]
@@ -68,14 +66,12 @@ fn test_listeners_only_receive_matching_type() {
     {
         let c = u32_count.clone();
         system
-            .register_listener::<u32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed))
-            .unwrap();
+            .register_listener::<u32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed));
     }
     {
         let c = i32_count.clone();
         system
-            .register_listener::<i32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed))
-            .unwrap();
+            .register_listener::<i32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed));
     }
 
     system.new_event::<u32>(1).unwrap();
@@ -93,15 +89,13 @@ fn test_panicking_listener_does_not_break_dispatch() {
     let count = Arc::new(AtomicUsize::new(0));
 
     system
-        .register_listener::<u32>(|_| panic!("listener panic (expected in test)"))
-        .unwrap();
+        .register_listener::<u32>(|_| panic!("listener panic (expected in test)"));
     {
         let count = count.clone();
         system
-            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed))
-            .unwrap();
+            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
     }
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
@@ -119,10 +113,9 @@ fn test_disable_skips_listeners_and_store() {
     {
         let count = count.clone();
         system
-            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed))
-            .unwrap();
+            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
     }
-    system.register_store::<u32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
 
     system.disable::<u32>().unwrap();
     // disabled events are not an error
@@ -141,8 +134,8 @@ fn test_disable_skips_listeners_and_store() {
 #[test]
 fn test_disable_all_enable_all() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
-    system.register_store::<i32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
+    system.register_store::<i32>(SlotType::All);
 
     system.disable_all();
 
@@ -164,8 +157,8 @@ fn test_disable_all_enable_all() {
 #[test]
 fn test_disable_only_affects_one_type() {
     let mut system = EventBackend::default();
-    system.register_store::<u32>(SlotType::All).unwrap();
-    system.register_store::<i32>(SlotType::All).unwrap();
+    system.register_store::<u32>(SlotType::All);
+    system.register_store::<i32>(SlotType::All);
 
     system.disable::<u32>().unwrap();
 
@@ -189,16 +182,15 @@ fn test_threads_trigger_events() {
     const THREADS: usize = 8;
     const PER_THREAD: usize = 1_000;
 
-    let mut system = EventBackend::<16>::new();
+    let mut system = EventBackend::new();
 
     let count = Arc::new(AtomicUsize::new(0));
     {
         let count = count.clone();
         system
-            .register_listener::<usize>(move |_| _ = count.fetch_add(1, Ordering::Relaxed))
-            .unwrap();
+            .register_listener::<usize>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
     }
-    system.register_store::<usize>(SlotType::All).unwrap();
+    system.register_store::<usize>(SlotType::All);
 
     std::thread::scope(|s| {
         for t in 0..THREADS {
@@ -223,8 +215,8 @@ fn test_threads_trigger_events() {
 fn test_threads_trigger_while_querying() {
     const TOTAL: usize = 10_000;
 
-    let mut system = EventBackend::<16>::new();
-    system.register_store::<usize>(SlotType::All).unwrap();
+    let mut system = EventBackend::new();
+    system.register_store::<usize>(SlotType::All);
 
     let received = std::thread::scope(|s| {
         let producer = s.spawn(|| {

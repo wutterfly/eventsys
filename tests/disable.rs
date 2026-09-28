@@ -6,10 +6,9 @@ fn test_disable_enable() {
 
     // Register events
     system
-        .register_store::<(i32, i32, i32)>(SlotType::All)
-        .unwrap();
-    system.register_store::<(i64, u64)>(SlotType::All).unwrap();
-    system.register_store::<u128>(SlotType::All).unwrap();
+        .register_store::<(i32, i32, i32)>(SlotType::All);
+    system.register_store::<(i64, u64)>(SlotType::All);
+    system.register_store::<u128>(SlotType::All);
 
     // disable double events
     system.disable::<(i64, u64)>().unwrap();

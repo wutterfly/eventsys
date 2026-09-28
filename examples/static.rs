@@ -28,7 +28,6 @@ struct KeyboardEvent {
 
 fn main() {
     // create event system
-    // events can be a max size of 24 bytes
     let mut system = EventBackend::new();
 
     // create listener to be called on event trigger
@@ -37,10 +36,10 @@ fn main() {
     };
 
     // register listener for event type
-    system.register_listener::<KeyboardEvent>(listener).unwrap();
+    system.register_listener::<KeyboardEvent>(listener);
 
     // register event type
-    system.register_store::<MouseEvent>(SlotType::All).unwrap();
+    system.register_store::<MouseEvent>(SlotType::All);
 
     // set global event system
     println!("{:?}", system);

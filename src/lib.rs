@@ -26,8 +26,8 @@
 //! ```rust
 //! use eventsys::EventBackend;
 //!
-//! // create event system, events can be a max size of 16 bytes
-//! let mut system = EventBackend::<16>::new();
+//! // create event system
+//! let mut system = EventBackend::new();
 //!
 //! // create listener to be called on event trigger
 //! let listener = |event: &u32| {
@@ -35,7 +35,7 @@
 //! };
 //!
 //! // register listener for event type
-//! system.register_listener::<u32>(listener).unwrap();
+//! system.register_listener::<u32>(listener);
 //!
 //! // trigger event
 //! system.new_event::<u32>(123);
@@ -50,11 +50,11 @@
 //! ```rust
 //! use eventsys::{EventBackend, SlotType};
 //!
-//! // create event system, events can be a max size of 16 bytes
-//! let mut system = EventBackend::<16>::new();
-//!     
+//! // create event system
+//! let mut system = EventBackend::new();
+//!
 //! // register listener for event type
-//! system.register_store::<u32>(SlotType::All).unwrap();
+//! system.register_store::<u32>(SlotType::All);
 //!
 //! // trigger event
 //! system.new_event::<u32>(123);
@@ -82,8 +82,6 @@ mod err;
 mod map;
 mod query;
 mod slot;
-
-const DEFAULT_EVENT_SIZE: usize = anythingy::DEFAULT_THING_SIZE;
 
 pub use backend::EventBackend;
 pub use slot::SlotType;
