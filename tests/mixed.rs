@@ -23,7 +23,7 @@ fn test_listener_and_store_on_same_type() {
     assert_eq!(&*seen.lock().unwrap(), &[1, 2]);
 
     // event was stored for later
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [1, 2]);
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn test_store_registered_before_listener() {
     system.new_event::<u32>(1).unwrap();
 
     assert_eq!(count.load(Ordering::Relaxed), 1);
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [1]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [1]);
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn test_panicking_listener_does_not_break_dispatch() {
 
     // listeners after the panicking one are still called, events are still stored
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [1, 2]);
 }
 
 #[test]
@@ -115,13 +115,13 @@ fn test_disable_skips_listeners_and_store() {
     system.new_event::<u32>(1).unwrap();
 
     assert_eq!(count.load(Ordering::Relaxed), 0);
-    assert_eq!(system.query::<u32>().unwrap().len(), 0);
+    assert_eq!(system.consume::<u32>().unwrap().len(), 0);
 
     system.enable::<u32>().unwrap();
     system.new_event::<u32>(2).unwrap();
 
     assert_eq!(count.load(Ordering::Relaxed), 1);
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [2]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [2]);
 }
 
 #[test]
@@ -135,16 +135,16 @@ fn test_disable_all_enable_all() {
     system.new_event::<u32>(1).unwrap();
     system.new_event::<i32>(-1).unwrap();
 
-    assert_eq!(system.query::<u32>().unwrap().len(), 0);
-    assert_eq!(system.query::<i32>().unwrap().len(), 0);
+    assert_eq!(system.consume::<u32>().unwrap().len(), 0);
+    assert_eq!(system.consume::<i32>().unwrap().len(), 0);
 
     system.enable_all();
 
     system.new_event::<u32>(2).unwrap();
     system.new_event::<i32>(-2).unwrap();
 
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [2]);
-    assert_eq!(system.query::<i32>().unwrap().collect::<Vec<_>>(), [-2]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [2]);
+    assert_eq!(system.consume::<i32>().unwrap().collect::<Vec<_>>(), [-2]);
 }
 
 #[test]
@@ -158,8 +158,8 @@ fn test_disable_only_affects_one_type() {
     system.new_event::<u32>(1).unwrap();
     system.new_event::<i32>(-1).unwrap();
 
-    assert_eq!(system.query::<u32>().unwrap().len(), 0);
-    assert_eq!(system.query::<i32>().unwrap().collect::<Vec<_>>(), [-1]);
+    assert_eq!(system.consume::<u32>().unwrap().len(), 0);
+    assert_eq!(system.consume::<i32>().unwrap().collect::<Vec<_>>(), [-1]);
 }
 
 #[test]
@@ -198,13 +198,13 @@ fn test_threads_trigger_events() {
     assert_eq!(count.load(Ordering::Relaxed), THREADS * PER_THREAD);
 
     // every event arrived exactly once
-    let mut events = system.query::<usize>().unwrap().collect::<Vec<_>>();
+    let mut events = system.consume::<usize>().unwrap().collect::<Vec<_>>();
     events.sort_unstable();
     assert_eq!(events, (0..THREADS * PER_THREAD).collect::<Vec<_>>());
 }
 
 #[test]
-fn test_threads_trigger_while_querying() {
+fn test_threads_trigger_while_consuming() {
     const TOTAL: usize = 10_000;
 
     let mut system = EventBackend::new();
@@ -220,12 +220,12 @@ fn test_threads_trigger_while_querying() {
         // consume batches while events are still being produced
         let mut received = Vec::with_capacity(TOTAL);
         while !producer.is_finished() {
-            received.extend(system.query::<usize>().unwrap());
+            received.extend(system.consume::<usize>().unwrap());
         }
         producer.join().unwrap();
 
         // final batch
-        received.extend(system.query::<usize>().unwrap());
+        received.extend(system.consume::<usize>().unwrap());
         received
     });
 

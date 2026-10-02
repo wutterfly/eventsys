@@ -61,17 +61,44 @@
 //! system.new_event::<u32>(456);
 //! system.new_event::<u32>(789);
 //!
-//! // query batch
-//! let event_iter = system.query::<u32>().unwrap();
+//! // consume batch
+//! let event_iter = system.consume::<u32>().unwrap();
 //!
 //! for event in event_iter {
 //!     // handle event
 //! }
 //! ```
 //!
+//! ## Observing Events in Several Places
 //!
+//! Consuming events with [`EventBackend::consume()`] takes them out of the event system, so only one place can
+//! handle them. If several parts of a program need to see the same events, observe them instead.
 //!
+//! The first [`EventBackend::observe()`] of an event type takes its events out of the event system and keeps them in
+//! a buffer. Every other call returns the same events, from any thread, until [`EventBackend::reset()`] starts a new
+//! round. Observing needs only shared access, and no event type has to be known or requested up front: whatever is
+//! asked for gets fetched on demand. Only resetting needs mutable access.
 //!
+//! ### Example Observing
+//!
+//! ```rust
+//! use eventsys::{EventBackend, SlotType};
+//!
+//! let mut system = EventBackend::new();
+//! system.register_store::<u32>(SlotType::All);
+//!
+//! // trigger events
+//! system.new_event::<u32>(1).unwrap();
+//! system.new_event::<u32>(2).unwrap();
+//!
+//! // the first observe takes the events out of the event system, any number of observers see the same ones
+//! assert_eq!(system.observe::<u32>().unwrap().as_slice(), [1, 2]);
+//! assert_eq!(system.observe::<u32>().unwrap().as_slice(), [1, 2]);
+//!
+//! // start a new round, the next observe fetches the events that were triggered since
+//! system.reset();
+//! assert!(system.observe::<u32>().unwrap().as_slice().is_empty());
+//! ```
 
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
@@ -79,10 +106,15 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod backend;
+mod consumed;
 mod err;
+mod fetched;
 mod map;
-mod query;
+mod observed;
 mod slot;
 
 pub use backend::EventBackend;
+pub use consumed::Consumed;
+pub use err::{EventError, NoValue, RawErr, Value};
+pub use observed::Observed;
 pub use slot::SlotType;

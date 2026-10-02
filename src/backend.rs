@@ -3,16 +3,20 @@ use std::{panic::RefUnwindSafe, sync::atomic::AtomicBool};
 use anythingy::HeapSize;
 
 use crate::{
+    consumed::Consumed,
     err::{EventError, Value},
+    fetched::Fetched,
     map::RegisteredMap,
-    query::UnblockingQuery,
+    observed::Observed,
     slot::{Slot, SlotType},
 };
 
-/// System to register events and event listeners as well as dispatch and query events.
+/// System to register events and event listeners as well as dispatch and consume events.
 ///
 ///
 /// Events can be either handled with an event listener or be registered and then stored and handled in batches later.
+/// A batch of stored events is either consumed by one caller ([`EventBackend::consume`]), or observed by any number of
+/// callers at once ([`EventBackend::observe`]).
 ///
 /// Events can be any type: there is no size restriction, and no wrapping or boxing happens behind your back.
 pub struct EventBackend {
@@ -28,7 +32,7 @@ impl EventBackend {
         }
     }
 
-    /// Registers a new type of event. Registered events can be queried in a batch.
+    /// Registers a new type of event. Registered events can be consumed in a batch.
     ///
     /// # Example
     /// ```rust
@@ -74,7 +78,7 @@ impl EventBackend {
     }
 
     /// Triggers a new event, calling all registered event listener. If event was registered to be stored,
-    /// event gets saved to be queried later after each listener was called.
+    /// event gets saved to be consumed later after each listener was called.
     ///
     /// # Errors
     /// Returns an `EventError`, if the event type is not registered, handing the value back.
@@ -102,11 +106,17 @@ impl EventBackend {
         }
     }
 
-    /// Returns an iterator over each event with the matching event type.
+    /// Takes all stored events of the matching event type out of the event system, and returns them as an iterator
+    /// that owns them.
+    ///
+    /// The events are removed, so only one caller ever gets them. To let several readers look at the same events
+    /// without consuming them, see [`EventBackend::observe`]. Events that are
+    /// not consumed by the time the iterator is dropped are dropped with it. Events that are triggered while holding
+    /// it are not part of it, they end up in the next batch.
     ///
     /// # Errors
     /// Returns an `UnregisteredEventType` error, if the given type was not registered as event type.
-    /// Returns an `RegisteredWithoutStore` error, if the queried type is not registered to store events.
+    /// Returns an `RegisteredWithoutStore` error, if the type is not registered to store events.
     ///
     /// # Example
     /// ```rust
@@ -114,23 +124,23 @@ impl EventBackend {
     /// # fn main() {
     /// # let mut system = EventBackend::default();
     /// # system.register_store::<u32>(SlotType::All);
-    /// let query = system.query::<u32>().unwrap();
+    /// let consumed = system.consume::<u32>().unwrap();
     ///
-    /// for event in query {
+    /// for event in consumed {
     ///     // handle event
     /// }
     /// # }
     /// ```
-    pub fn query<T>(&self) -> Result<UnblockingQuery<'_, T>, EventError<T>>
+    pub fn consume<T>(&self) -> Result<Consumed<'_, T>, EventError<T>>
     where
         T: Send + RefUnwindSafe + 'static,
     {
         self.registered.get::<T>().map_or_else(
-            || Err(EventError::unregisted_event_empty()),
+            || Err(EventError::unregistered_event_empty()),
             |registed| {
                 registed.slot().map_or_else(
                     || Err(EventError::registered_without_store()),
-                    |slot| Ok(slot.query_owned()),
+                    |slot| Ok(slot.consume()),
                 )
             },
         )
@@ -155,7 +165,7 @@ impl EventBackend {
         T: Send + RefUnwindSafe + 'static,
     {
         self.registered.get::<T>().map_or_else(
-            || Err(EventError::unregisted_event_empty()),
+            || Err(EventError::unregistered_event_empty()),
             |registered| {
                 registered.disable();
                 Ok(())
@@ -196,7 +206,7 @@ impl EventBackend {
         T: Send + RefUnwindSafe + 'static,
     {
         self.registered.get::<T>().map_or_else(
-            || Err(EventError::unregisted_event_empty()),
+            || Err(EventError::unregistered_event_empty()),
             |registered| {
                 registered.enable();
                 Ok(())
@@ -218,12 +228,101 @@ impl EventBackend {
         self.registered.enable_all();
     }
 
-    /// Frees allocated memory for batch events.
+    /// Drops all events that are currently stored, but keeps everything that was allocated for them, so storing
+    /// events again does not need to allocate.
     ///
-    /// # Warn
-    /// All events that are not consumed will get dropped. Also drops all registered listeners.
-    pub fn cleanup(&mut self) {
-        self.registered.cleanup_all();
+    /// Registered event types and listeners are not touched.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use eventsys::{EventBackend, SlotType};
+    /// # fn main() {
+    /// # let mut system = EventBackend::default();
+    /// system.register_store::<u32>(SlotType::All);
+    /// system.new_event::<u32>(1).unwrap();
+    ///
+    /// system.clear();
+    ///
+    /// assert_eq!(system.consume::<u32>().unwrap().len(), 0);
+    /// # }
+    /// ```
+    pub fn clear(&mut self) {
+        self.registered.clear_all();
+    }
+
+    /// Returns the events of the matching event type, for any number of observers to look at, without consuming them.
+    ///
+    /// [`EventBackend::consume`] hands the events to one caller, who owns them. This lets several callers (for
+    /// example the systems of a game engine), on any number of threads, look at the same events: the first call
+    /// takes the events of this type out of the event system, same as [`EventBackend::consume`] does, and keeps
+    /// them. Every call after that returns the same events, until [`EventBackend::reset`] drops them. That is one
+    /// round of observing: it lasts from one reset to the next, however long that is.
+    ///
+    /// Only shared access is needed, and no event type has to be known up front: whatever is asked for, from
+    /// wherever, gets fetched on demand by whoever asks first, as long as it was registered. Events can be triggered
+    /// at any time, even while others observe. They are part of the events of this round only if they were triggered
+    /// before the first `observe` of their type, otherwise they wait for the next round. The buffers are recycled, so
+    /// after a few rounds this does not allocate.
+    ///
+    /// Observing needs `T: Sync`, since the events are shared between all observers.
+    ///
+    /// # Notes
+    /// - Events of a type that nobody observes or consumes stay in the event system. Use a slot type that limits
+    ///   them, like [`SlotType::Max`] or [`SlotType::Last`], for events that may go unread.
+    /// - Mixing [`EventBackend::consume`] and [`EventBackend::observe`] for the same type splits the events between
+    ///   them: whatever is consumed is not part of the next round.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`EventBackend::consume`], for a type that is not registered or not registered to
+    /// store events.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use eventsys::{EventBackend, SlotType};
+    /// # fn main() {
+    /// let mut system = EventBackend::new();
+    /// system.register_store::<u32>(SlotType::All);
+    ///
+    /// system.new_event::<u32>(1).unwrap();
+    /// system.new_event::<u32>(2).unwrap();
+    ///
+    /// // the first observe takes the events out of the event system, any number of observers see the same ones
+    /// assert_eq!(system.observe::<u32>().unwrap().as_slice(), [1, 2]);
+    /// assert_eq!(system.observe::<u32>().unwrap().as_slice(), [1, 2]);
+    ///
+    /// // events that are triggered now are part of the next round
+    /// system.new_event::<u32>(3).unwrap();
+    /// assert_eq!(system.observe::<u32>().unwrap().as_slice(), [1, 2]);
+    ///
+    /// system.reset();
+    /// assert_eq!(system.observe::<u32>().unwrap().as_slice(), [3]);
+    /// # }
+    /// ```
+    pub fn observe<T>(&self) -> Result<Observed<'_, T>, EventError<T>>
+    where
+        T: Send + Sync + RefUnwindSafe + 'static,
+    {
+        self.registered.get::<T>().map_or_else(
+            || Err(EventError::unregistered_event_empty()),
+            |registered| {
+                registered
+                    .observe()
+                    .map(Observed::new)
+                    .ok_or_else(EventError::registered_without_store)
+            },
+        )
+    }
+
+    /// Ends the current round of observing: drops all observed events, so the next [`EventBackend::observe`] of a
+    /// type fetches the events that were triggered since.
+    ///
+    /// This needs mutable access, so no events can be observed while it runs. It does not need to know which types
+    /// were observed, it resets every registered type. The buffers keep their capacity.
+    ///
+    /// Events that were not observed yet are not touched, they stay in the event system. To drop those as well, see
+    /// [`EventBackend::clear`].
+    pub fn reset(&mut self) {
+        self.registered.reset_all();
     }
 }
 
@@ -266,6 +365,9 @@ pub struct Registered<T> {
     slot: Option<Box<Slot<T>>>,
     listener: Vec<Listener<T>>,
     enabled: AtomicBool,
+
+    // type-erased, so it does not depend on `T` either, and does not need `T: Sync` to keep `Registered<T>: Sync`
+    fetched: Fetched,
 }
 
 impl<T> Registered<T>
@@ -278,6 +380,7 @@ where
             slot: None,
             listener: Vec::new(),
             enabled: AtomicBool::new(true),
+            fetched: Fetched::new(),
         }
     }
 
@@ -293,7 +396,7 @@ where
             _ = std::panic::catch_unwind(|| (listener)(&value));
         }
 
-        // store event for querying it later
+        // store event for consuming it later
         if let Some(slot) = &self.slot {
             slot.push(value);
         }
@@ -317,17 +420,23 @@ where
     }
 
     #[inline]
-    pub(crate) fn cleanup(&mut self) {
-        self.listener = Vec::new();
+    pub(crate) fn reset(&mut self) {
+        self.fetched.reset();
+    }
+
+    /// Drops all stored events, including the fetched ones, but keeps the listeners and all allocations.
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.fetched.reset();
 
         if let Some(slot) = &mut self.slot {
-            slot.cleanup();
+            slot.clear();
         }
     }
 
     /// Counts the heap memory this registration has allocated: the listener buffer, the boxed slot itself (sized
-    /// like `Box<T>::heap_size`, i.e. the allocation that holds it, not what it owns), and whatever that slot has
-    /// allocated beyond that — see [`Slot::heap_size`].
+    /// like `Box<T>::heap_size`, i.e. the allocation that holds it, not what it owns), whatever that slot has
+    /// allocated beyond that — see [`Slot::heap_size`] — and the buffers of fetched events.
     #[inline]
     pub(crate) fn heap_size(&self) -> usize {
         self.listener.heap_size()
@@ -335,6 +444,21 @@ where
                 .slot
                 .as_deref()
                 .map_or(0, |slot| size_of_val(slot) + slot.heap_size())
+            + self.fetched.heap_size()
+    }
+}
+
+impl<T> Registered<T>
+where
+    T: Send + Sync + RefUnwindSafe + 'static,
+{
+    /// The events of this registered type, taken out of the slot by the first call after the last reset. `None`,
+    /// if no slot is registered.
+    #[inline]
+    pub(crate) fn observe(&self) -> Option<&[T]> {
+        let slot = self.slot()?;
+
+        Some(self.fetched.observe(|buffer| buffer.extend(slot.consume())))
     }
 }
 
@@ -344,7 +468,7 @@ impl<T> std::fmt::Debug for Registered<T> {
             .field("slot", &self.slot.is_some())
             .field("listener", &self.listener.len())
             .field("enabled", &self.enabled)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -436,13 +560,13 @@ mod tests {
         let mut events = EventBackend::new();
         events.register_store::<u32>(crate::SlotType::Last);
         let before = events.heap_size();
-        assert!(before > 0, "`AtomicSlot` allocates its two boxes up front");
+        assert!(before > 0, "`AtomicSlot` allocates up front");
 
         for i in 0..1_000u32 {
             events.new_event(i).unwrap();
         }
 
-        // `AtomicSlot` allocates its two boxes once, in `new`; pushing only ever swaps values into them
+        // `AtomicSlot` allocates once, in `new`; pushing only ever swaps values into what it allocated
         assert_eq!(events.heap_size(), before);
     }
 
@@ -479,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn test_heap_size_shrinks_after_cleanup() {
+    fn test_heap_size_is_kept_by_clear() {
         use anythingy::HeapSize;
 
         let mut events = EventBackend::new();
@@ -489,8 +613,10 @@ mod tests {
         }
         let before = events.heap_size();
 
-        events.cleanup();
+        // the events are gone, what was allocated for them is not
+        events.clear();
 
-        assert!(events.heap_size() < before);
+        assert_eq!(events.consume::<u32>().unwrap().len(), 0);
+        assert!(events.heap_size() >= before);
     }
 }

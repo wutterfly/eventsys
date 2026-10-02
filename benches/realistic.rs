@@ -127,26 +127,26 @@ fn trigger_frame(events: &Backend, frame: u32) {
 
 /// Handles all stored events of a frame.
 macro_rules! consume_frame {
-    ($events:expr, $query:ident) => {{
+    ($events:expr, $consume:ident) => {{
         let events = $events;
         let mut acc = 0u64;
 
-        for e in events.$query::<MouseMove>().unwrap() {
+        for e in events.$consume::<MouseMove>().unwrap() {
             acc += (e.x + e.y) as u64;
         }
-        for e in events.$query::<MouseButton>().unwrap() {
+        for e in events.$consume::<MouseButton>().unwrap() {
             acc += u64::from(e.button) + u64::from(e.pressed);
         }
-        for e in events.$query::<Key>().unwrap() {
+        for e in events.$consume::<Key>().unwrap() {
             acc += u64::from(e.code) + u64::from(e.pressed);
         }
-        for e in events.$query::<Scroll>().unwrap() {
+        for e in events.$consume::<Scroll>().unwrap() {
             acc += (e.dx + e.dy) as u64;
         }
-        for e in events.$query::<Resize>().unwrap() {
+        for e in events.$consume::<Resize>().unwrap() {
             acc += u64::from(e.w) + u64::from(e.h);
         }
-        for e in events.$query::<Redraw>().unwrap() {
+        for e in events.$consume::<Redraw>().unwrap() {
             acc += u64::from(e.id);
         }
 
@@ -160,18 +160,18 @@ fn frame(c: &mut Criterion) {
 
     let events = frame_backend();
     let mut n = 0u32;
-    group.bench_function("busy/query", |b| {
+    group.bench_function("busy/consume", |b| {
         b.iter(|| {
             n = n.wrapping_add(1);
             trigger_frame(&events, n);
-            consume_frame!(&events, query)
+            consume_frame!(&events, consume)
         });
     });
 
     // most frames have nothing to handle
     let events = frame_backend();
-    group.bench_function("idle/query", |b| {
-        b.iter(|| consume_frame!(&events, query));
+    group.bench_function("idle/consume", |b| {
+        b.iter(|| consume_frame!(&events, consume));
     });
 }
 
@@ -285,7 +285,7 @@ fn pipeline(c: &mut Criterion) {
                 let mut received = 0u64;
                 let mut acc = 0u64;
                 while received < PRODUCERS * SAMPLES {
-                    for sample in events.query::<Sample>().unwrap() {
+                    for sample in events.consume::<Sample>().unwrap() {
                         acc = acc.wrapping_add(sample.0);
                         received += 1;
                     }

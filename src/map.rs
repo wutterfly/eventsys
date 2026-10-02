@@ -1,6 +1,6 @@
 use std::{any::TypeId, panic::RefUnwindSafe};
 
-use anythingy::HeapSize;
+use anythingy::{HeapSize, InlineMap, TypeIdBuildHasher};
 
 use crate::backend::Registered;
 
@@ -18,14 +18,15 @@ type Erased = anythingy::SThing<REGISTERED_SIZE>;
 
 /// A registration, plus the operations needed to work on it without knowing its `T`.
 ///
-/// `enable`/`disable`/`cleanup`/`heap_size` are plain (non-capturing) function pointers, monomorphized once per
-/// `T` at registration time; calling one just reconstructs the `&Registered<T>`/`&mut Registered<T>` and calls
+/// `enable`/`disable`/`clear`/`reset`/`heap_size` are plain (non-capturing) function pointers, monomorphized once
+/// per `T` at registration time; calling one just reconstructs the `&Registered<T>`/`&mut Registered<T>` and calls
 /// the matching inherent method.
 struct Entry {
     value: Erased,
     enable: fn(&Erased),
     disable: fn(&Erased),
-    cleanup: fn(&mut Erased),
+    clear: fn(&mut Erased),
+    reset: fn(&mut Erased),
     heap_size: fn(&Erased) -> usize,
 }
 
@@ -39,7 +40,8 @@ impl Entry {
             value: Erased::new(Registered::<T>::new()),
             enable: |erased| erased.get_ref::<Registered<T>>().enable(),
             disable: |erased| erased.get_ref::<Registered<T>>().disable(),
-            cleanup: |erased| erased.get_mut::<Registered<T>>().cleanup(),
+            clear: |erased| erased.get_mut::<Registered<T>>().clear(),
+            reset: |erased| erased.get_mut::<Registered<T>>().reset(),
             // `erased` itself is only heap-allocated if `Registered<T>` didn't fit inline, which it always does
             // (see `REGISTERED_SIZE`), but it costs nothing to ask rather than assume.
             heap_size: |erased| erased.heap_size() + erased.get_ref::<Registered<T>>().heap_size(),
@@ -47,28 +49,35 @@ impl Entry {
     }
 }
 
+/// How many event types are looked up by scanning, before they are looked up by hashing instead.
+///
+/// As long as there are at most this many event types, they are found by comparing them to the registered ones.
+/// Finding the first costs about `2.8 ns`, and every one it has to pass after that about `0.4 ns` more. Beyond this
+/// many types, all of them are found by hashing, which costs about `3.3 ns` however many there are.
+///
+/// So hashing is already cheaper than scanning from about 3 types on, which is why this is small. Measured on the
+/// whole benchmark suite: `4` and `8` are the same, `2` is a little slower for a frame that is mostly lookups, and
+/// `16` is slower for a program with 16 event types, since it scans most of them for every event. `4` is the
+/// smallest of the two that are the same, and every inline registration is part of the [`RegisteredMap`]. Within
+/// this many types, register the ones that are used the most first, they are the cheapest to find.
+const INLINE_TYPES: usize = 4;
+
 /// Maps event types to their registration.
 ///
-/// Keys and values are stored in separate vectors, so looking up a type only scans densely packed keys. Each
-/// value is type-erased into a fixed-size inline buffer (see [`REGISTERED_SIZE`]), so registering a type never
-/// needs a separate heap allocation.
+/// Up to [`INLINE_TYPES`] event types are found by scanning densely packed keys, and more than that with a hash map,
+/// so finding a type does not get slower with every one that is registered. Each value is type-erased into a
+/// fixed-size inline buffer (see [`REGISTERED_SIZE`]), so registering a type never needs a separate heap allocation
+/// for the registration itself.
 pub struct RegisteredMap {
-    keys: Vec<TypeId>,
-    entries: Vec<Entry>,
+    entries: InlineMap<TypeId, Entry, INLINE_TYPES, TypeIdBuildHasher>,
 }
 
 impl RegisteredMap {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            keys: Vec::new(),
-            entries: Vec::new(),
+            entries: InlineMap::with_hasher(TypeIdBuildHasher::new()),
         }
-    }
-
-    #[inline]
-    fn position(&self, key: &TypeId) -> Option<usize> {
-        self.keys.iter().position(|k| k == key)
     }
 
     /// Returns the registration for `T`, if one exists.
@@ -77,8 +86,9 @@ impl RegisteredMap {
     where
         T: Send + RefUnwindSafe + 'static,
     {
-        self.position(&TypeId::of::<T>())
-            .map(|i| self.entries[i].value.get_ref::<Registered<T>>())
+        self.entries
+            .get(&TypeId::of::<T>())
+            .map(|entry| entry.value.get_ref::<Registered<T>>())
     }
 
     /// Returns the registration for `T`, creating an empty one if none exists yet.
@@ -87,54 +97,56 @@ impl RegisteredMap {
     where
         T: Send + RefUnwindSafe + 'static,
     {
-        let id = TypeId::of::<T>();
-
-        let i = self.position(&id).unwrap_or_else(|| {
-            self.keys.push(id);
-            self.entries.push(Entry::new::<T>());
-            self.entries.len() - 1
-        });
-
-        self.entries[i].value.get_mut::<Registered<T>>()
+        self.entries
+            .entry(TypeId::of::<T>())
+            .or_insert_with(Entry::new::<T>)
+            .value
+            .get_mut::<Registered<T>>()
     }
 
     #[inline]
     pub fn disable_all(&self) {
-        for entry in &self.entries {
+        for entry in self.entries.values() {
             (entry.disable)(&entry.value);
         }
     }
 
     #[inline]
     pub fn enable_all(&self) {
-        for entry in &self.entries {
+        for entry in self.entries.values() {
             (entry.enable)(&entry.value);
         }
     }
 
     #[inline]
-    pub fn cleanup_all(&mut self) {
-        for entry in &mut self.entries {
-            (entry.cleanup)(&mut entry.value);
+    pub fn clear_all(&mut self) {
+        for entry in self.entries.values_mut() {
+            (entry.clear)(&mut entry.value);
         }
     }
 
     #[inline]
-    pub const fn len(&self) -> usize {
-        self.keys.len()
+    pub fn reset_all(&mut self) {
+        for entry in self.entries.values_mut() {
+            (entry.reset)(&mut entry.value);
+        }
     }
 
-    /// Counts the heap memory every registered type has allocated: the key/entry tables themselves, plus what
-    /// each registration owns — see [`Registered::heap_size`] and [`crate::slot::Slot::heap_size`] for what that
-    /// includes. Like [`anythingy::EventQueue::heap_size`], which some slots forward to, this walks every
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Counts the heap memory every registered type has allocated: the table of the types that do not fit inline,
+    /// plus what each registration owns — see [`Registered::heap_size`] and [`crate::slot::Slot::heap_size`] for
+    /// what that includes. Like [`anythingy::EventQueue::heap_size`], which some slots forward to, this walks every
     /// registration, so it is meant for occasional checks, and the result is a snapshot.
     #[inline]
     pub fn heap_size(&self) -> usize {
-        self.keys.heap_size()
-            + self.entries.heap_size()
+        self.entries.heap_size()
             + self
                 .entries
-                .iter()
+                .values()
                 .map(|entry| (entry.heap_size)(&entry.value))
                 .sum::<usize>()
     }

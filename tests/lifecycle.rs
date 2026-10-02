@@ -18,12 +18,12 @@ fn test_stored_events_are_alive_until_queried() {
     }
     assert_eq!(Arc::strong_count(&probe), 4);
 
-    let mut query = system.query::<Arc<()>>().unwrap();
-    let taken = query.next().unwrap();
+    let mut consumed = system.consume::<Arc<()>>().unwrap();
+    let taken = consumed.next().unwrap();
     assert_eq!(Arc::strong_count(&probe), 4);
 
-    // unconsumed events get dropped together with the query
-    drop(query);
+    // unconsumed events get dropped together with the consumed events
+    drop(consumed);
     assert_eq!(Arc::strong_count(&probe), 2);
 
     drop(taken);
@@ -31,7 +31,7 @@ fn test_stored_events_are_alive_until_queried() {
 }
 
 #[test]
-fn test_unblocking_query_drops_unconsumed_events() {
+fn test_consume_drops_unconsumed_events() {
     let mut system = EventBackend::default();
     system.register_store::<Arc<()>>(SlotType::All);
 
@@ -41,13 +41,13 @@ fn test_unblocking_query_drops_unconsumed_events() {
         system.new_event(probe.clone()).unwrap();
     }
 
-    let mut query = system.query::<Arc<()>>().unwrap();
-    // the events moved into the query
-    assert_eq!(query.len(), 3);
-    drop(query.next());
+    let mut consumed = system.consume::<Arc<()>>().unwrap();
+    // the events moved into the consumed events
+    assert_eq!(consumed.len(), 3);
+    drop(consumed.next());
     assert_eq!(Arc::strong_count(&probe), 3);
 
-    drop(query);
+    drop(consumed);
     assert_eq!(Arc::strong_count(&probe), 1);
 }
 
@@ -137,7 +137,7 @@ fn test_unregistered_event_is_returned_not_leaked() {
 }
 
 #[test]
-fn test_cleanup_drops_stored_events() {
+fn test_clear_drops_stored_events() {
     let mut system = EventBackend::default();
     system.register_store::<Arc<()>>(SlotType::All);
 
@@ -148,27 +148,45 @@ fn test_cleanup_drops_stored_events() {
     }
     assert_eq!(Arc::strong_count(&probe), 6);
 
-    system.cleanup();
+    system.clear();
     assert_eq!(Arc::strong_count(&probe), 1);
 
-    // the slot is still usable after cleanup
+    // the slot is still usable after clear
     system.new_event(probe.clone()).unwrap();
-    assert_eq!(system.query::<Arc<()>>().unwrap().count(), 1);
+    assert_eq!(system.consume::<Arc<()>>().unwrap().count(), 1);
 }
 
 #[test]
-fn test_cleanup_drops_listeners() {
+fn test_clear_keeps_listeners() {
     let mut system = EventBackend::default();
 
-    let probe = Arc::new(());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     {
-        let probe = probe.clone();
-        system.register_listener::<u32>(move |_| _ = &probe);
+        let calls = calls.clone();
+        system.register_listener::<u32>(move |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
     }
-    assert_eq!(Arc::strong_count(&probe), 2);
 
-    system.cleanup();
-    assert_eq!(Arc::strong_count(&probe), 1);
+    system.clear();
+
+    // the listener is still registered, and still called
+    system.new_event(1u32).unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(Arc::strong_count(&calls), 2);
+}
+
+#[test]
+fn test_clear_keeps_registered_types() {
+    let mut system = EventBackend::default();
+    system.register_store::<u32>(SlotType::Last);
+    system.register_listener::<u64>(|_| {});
+
+    system.clear();
+
+    assert!(system.new_event(1u32).is_ok());
+    assert!(system.new_event(2u64).is_ok());
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [1]);
 }
 
 #[test]
@@ -189,10 +207,10 @@ fn test_backend_drop_drops_stored_events() {
 }
 
 #[test]
-fn test_cleanup_on_empty_backend() {
+fn test_clear_on_empty_backend() {
     let mut system = EventBackend::default();
-    system.cleanup();
+    system.clear();
 
     system.register_listener::<u32>(|_| {});
-    system.cleanup();
+    system.clear();
 }

@@ -41,18 +41,18 @@ fn test_batch() {
 
     // collect triggered events
     let all_events = system
-        .query::<Box<(i32, i32, i32)>>()
+        .consume::<Box<(i32, i32, i32)>>()
         .unwrap()
         .map(|x| *x)
         .collect::<Vec<_>>();
 
-    let first_events = system.query::<(i64, u64)>().unwrap().collect::<Vec<_>>();
+    let first_events = system.consume::<(i64, u64)>().unwrap().collect::<Vec<_>>();
 
-    let last_events = system.query::<u128>().unwrap().collect::<Vec<_>>();
+    let last_events = system.consume::<u128>().unwrap().collect::<Vec<_>>();
 
-    let cmp_events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    let cmp_events = system.consume::<u32>().unwrap().collect::<Vec<_>>();
 
-    let filter_events = system.query::<u64>().unwrap().collect::<Vec<_>>();
+    let filter_events = system.consume::<u64>().unwrap().collect::<Vec<_>>();
 
     // check all events
     assert_eq!(&all_events, &[(1, 2, 3), (5, 6, 7)]);
@@ -81,7 +81,7 @@ fn test_batch_max() {
     }
 
     // only the newest 3 events are kept, oldest first
-    let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    let events = system.consume::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&events, &[7, 8, 9]);
 }
 
@@ -95,7 +95,7 @@ fn test_batch_max_not_reached() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    let events = system.consume::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&events, &[0, 1, 2, 3, 4]);
 }
 
@@ -109,7 +109,7 @@ fn test_batch_max_one() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    let events = system.consume::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&events, &[9]);
 }
 
@@ -123,57 +123,57 @@ fn test_batch_max_zero_stores_nothing() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let query = system.query::<u32>().unwrap();
-    assert_eq!(query.len(), 0);
-    assert_eq!(query.count(), 0);
+    let consumed = system.consume::<u32>().unwrap();
+    assert_eq!(consumed.len(), 0);
+    assert_eq!(consumed.count(), 0);
 }
 
 #[test]
-fn test_batch_query_drains() {
+fn test_batch_consume_takes_the_events() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
 
-    let first = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    let first = system.consume::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&first, &[1, 2]);
 
-    // events were consumed, second query is empty
-    let second = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    // events were consumed, consuming again returns nothing
+    let second = system.consume::<u32>().unwrap().collect::<Vec<_>>();
     assert!(second.is_empty());
 
-    // new events can be stored after draining
+    // new events can be stored after consuming
     system.new_event::<u32>(3).unwrap();
-    let third = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    let third = system.consume::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&third, &[3]);
 }
 
 #[test]
-fn test_batch_query_unblocking() {
+fn test_batch_consume() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::All);
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
 
-    let query = system.query::<u32>().unwrap();
-    assert_eq!(query.len(), 2);
+    let consumed = system.consume::<u32>().unwrap();
+    assert_eq!(consumed.len(), 2);
 
-    // events triggered while holding the query are not blocked and end up in the next batch
+    // events triggered while holding the consumed events are not blocked and end up in the next batch
     system.new_event::<u32>(3).unwrap();
     system.new_event::<u32>(4).unwrap();
 
-    assert_eq!(query.collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(consumed.collect::<Vec<_>>(), [1, 2]);
 
-    let next = system.query::<u32>().unwrap().collect::<Vec<_>>();
+    let next = system.consume::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&next, &[3, 4]);
 
-    assert_eq!(system.query::<u32>().unwrap().len(), 0);
+    assert_eq!(system.consume::<u32>().unwrap().len(), 0);
 }
 
 #[test]
-fn test_batch_query_unblocking_slot_types() {
+fn test_batch_consume_slot_types() {
     let mut system = EventBackend::default();
 
     system.register_store::<u8>(SlotType::First);
@@ -188,14 +188,14 @@ fn test_batch_query_unblocking_slot_types() {
         system.new_event::<u64>(i.into()).unwrap();
     }
 
-    assert_eq!(system.query::<u8>().unwrap().collect::<Vec<_>>(), [1]);
-    assert_eq!(system.query::<u16>().unwrap().collect::<Vec<_>>(), [5]);
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [4, 5]);
-    assert_eq!(system.query::<u64>().unwrap().collect::<Vec<_>>(), [2, 4]);
+    assert_eq!(system.consume::<u8>().unwrap().collect::<Vec<_>>(), [1]);
+    assert_eq!(system.consume::<u16>().unwrap().collect::<Vec<_>>(), [5]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [4, 5]);
+    assert_eq!(system.consume::<u64>().unwrap().collect::<Vec<_>>(), [2, 4]);
 }
 
 #[test]
-fn test_batch_first_and_last_after_drain() {
+fn test_batch_first_and_last_after_consume() {
     let mut system = EventBackend::default();
     system.register_store::<u8>(SlotType::First);
     system.register_store::<u16>(SlotType::Last);
@@ -205,17 +205,17 @@ fn test_batch_first_and_last_after_drain() {
     system.new_event::<u16>(1).unwrap();
     system.new_event::<u16>(2).unwrap();
 
-    assert_eq!(system.query::<u8>().unwrap().collect::<Vec<_>>(), [1]);
-    assert_eq!(system.query::<u16>().unwrap().collect::<Vec<_>>(), [2]);
+    assert_eq!(system.consume::<u8>().unwrap().collect::<Vec<_>>(), [1]);
+    assert_eq!(system.consume::<u16>().unwrap().collect::<Vec<_>>(), [2]);
 
-    // after draining, the slots start over
+    // after consuming, the slots start over
     system.new_event::<u8>(3).unwrap();
     system.new_event::<u8>(4).unwrap();
     system.new_event::<u16>(3).unwrap();
     system.new_event::<u16>(4).unwrap();
 
-    assert_eq!(system.query::<u8>().unwrap().collect::<Vec<_>>(), [3]);
-    assert_eq!(system.query::<u16>().unwrap().collect::<Vec<_>>(), [4]);
+    assert_eq!(system.consume::<u8>().unwrap().collect::<Vec<_>>(), [3]);
+    assert_eq!(system.consume::<u16>().unwrap().collect::<Vec<_>>(), [4]);
 }
 
 #[test]
@@ -228,8 +228,8 @@ fn test_batch_types_are_independent() {
     system.new_event::<i32>(-1).unwrap();
     system.new_event::<u32>(2).unwrap();
 
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [1, 2]);
-    assert_eq!(system.query::<i32>().unwrap().collect::<Vec<_>>(), [-1]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(system.consume::<i32>().unwrap().collect::<Vec<_>>(), [-1]);
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn test_batch_register_store_replaces_slot() {
     system.new_event::<u32>(3).unwrap();
     system.new_event::<u32>(4).unwrap();
 
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [4]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [4]);
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn test_batch_large_types() {
     system.new_event::<[u64; 32]>([1; 32]).unwrap();
     system.new_event::<[u64; 32]>([2; 32]).unwrap();
 
-    let events = system.query::<[u64; 32]>().unwrap().collect::<Vec<_>>();
+    let events = system.consume::<[u64; 32]>().unwrap().collect::<Vec<_>>();
     assert_eq!(&events, &[[1; 32], [2; 32]]);
 }
 
@@ -272,17 +272,17 @@ fn test_batch_heap_types() {
     system.new_event::<Vec<u32>>(vec![1, 2, 3]).unwrap();
 
     assert_eq!(
-        system.query::<String>().unwrap().collect::<Vec<_>>(),
+        system.consume::<String>().unwrap().collect::<Vec<_>>(),
         ["hello", "world"]
     );
     assert_eq!(
-        system.query::<Vec<u32>>().unwrap().collect::<Vec<_>>(),
+        system.consume::<Vec<u32>>().unwrap().collect::<Vec<_>>(),
         [vec![1, 2, 3]]
     );
 }
 
 #[test]
-fn test_batch_query_size_hint() {
+fn test_batch_consume_size_hint() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::All);
 
@@ -290,39 +290,39 @@ fn test_batch_query_size_hint() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let mut query = system.query::<u32>().unwrap();
-    assert_eq!(query.size_hint(), (5, Some(5)));
-    assert_eq!(query.len(), 5);
+    let mut consumed = system.consume::<u32>().unwrap();
+    assert_eq!(consumed.size_hint(), (5, Some(5)));
+    assert_eq!(consumed.len(), 5);
 
-    query.next();
-    assert_eq!(query.size_hint(), (4, Some(4)));
-    assert_eq!(query.len(), 4);
+    consumed.next();
+    assert_eq!(consumed.size_hint(), (4, Some(4)));
+    assert_eq!(consumed.len(), 4);
 }
 
 #[test]
-fn test_batch_first_accepts_new_event_after_every_kind_of_drain() {
+fn test_batch_first_accepts_new_event_after_every_way_of_consuming() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::First);
 
-    // drained by query
+    // consumed with consume()
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [1]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [1]);
 
-    // drained by cleanup
+    // dropped by clear()
     system.new_event::<u32>(5).unwrap();
     system.new_event::<u32>(6).unwrap();
-    system.cleanup();
+    system.clear();
     system.new_event::<u32>(7).unwrap();
     system.new_event::<u32>(8).unwrap();
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [7]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [7]);
 
-    // query without any consumed event still resets the slot: every query is all-or-nothing, so merely
+    // consume without any event read still resets the slot: every consume is all-or-nothing, so merely
     // acquiring and dropping one discards whatever was pending, even unread
     system.new_event::<u32>(9).unwrap();
-    drop(system.query::<u32>().unwrap());
+    drop(system.consume::<u32>().unwrap());
     system.new_event::<u32>(10).unwrap();
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [10]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [10]);
 }
 
 #[test]
@@ -346,7 +346,7 @@ fn test_batch_first_threads_keep_exactly_one() {
         });
 
         // exactly one event is kept per round, no matter which thread was first
-        let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+        let events = system.consume::<u32>().unwrap().collect::<Vec<_>>();
         assert_eq!(events.len(), 1, "round {round}");
     }
 }
@@ -372,7 +372,7 @@ fn test_batch_last_threads_overwrite() {
         });
 
         // exactly one event is kept per round, no matter which thread wrote last
-        let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+        let events = system.consume::<u32>().unwrap().collect::<Vec<_>>();
         assert_eq!(events.len(), 1, "round {round}");
         assert!(events[0] < THREADS * PER_THREAD, "round {round}");
     }
@@ -407,7 +407,7 @@ fn test_batch_last_threads_with_pointer_shaped_payload() {
 
         // exactly one event survives per round, and it is a value that was actually pushed
         let events = system
-            .query::<std::sync::Arc<usize>>()
+            .consume::<std::sync::Arc<usize>>()
             .unwrap()
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 1, "round {round}");
@@ -417,11 +417,11 @@ fn test_batch_last_threads_with_pointer_shaped_payload() {
 }
 
 #[test]
-fn test_batch_query_many_batches() {
+fn test_batch_consume_many_batches() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::All);
 
-    // batches of different sizes, some are empty, consumed by both kinds of queries
+    // batches of different sizes, some are empty, consumed with both kinds of iteration
     let sizes = [0usize, 1, 5, 100, 3, 0, 0, 40, 1, 200, 0, 7];
 
     for (round, size) in sizes.into_iter().cycle().take(60).enumerate() {
@@ -433,14 +433,14 @@ fn test_batch_query_many_batches() {
             system.new_event::<u32>(*value).unwrap();
         }
 
-        let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+        let events = system.consume::<u32>().unwrap().collect::<Vec<_>>();
 
         assert_eq!(events, expected, "round {round}");
     }
 }
 
 #[test]
-fn test_batch_query_partially_consumed_does_not_leak_into_next_batch() {
+fn test_batch_consume_partially_consumed_does_not_leak_into_next_batch() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::All);
 
@@ -449,15 +449,15 @@ fn test_batch_query_partially_consumed_does_not_leak_into_next_batch() {
             system.new_event::<u32>(round * 100 + i).unwrap();
         }
 
-        // only take some of the events, the others get dropped with the query
-        let mut query = system.query::<u32>().unwrap();
-        assert_eq!(query.next(), Some(round * 100));
-        assert_eq!(query.next(), Some(round * 100 + 1));
-        drop(query);
+        // only take some of the events, the others get dropped with the consumed events
+        let mut consumed = system.consume::<u32>().unwrap();
+        assert_eq!(consumed.next(), Some(round * 100));
+        assert_eq!(consumed.next(), Some(round * 100 + 1));
+        drop(consumed);
 
         system.new_event::<u32>(round * 100 + 50).unwrap();
         assert_eq!(
-            system.query::<u32>().unwrap().collect::<Vec<_>>(),
+            system.consume::<u32>().unwrap().collect::<Vec<_>>(),
             [round * 100 + 50]
         );
     }
@@ -470,18 +470,18 @@ fn test_batch_two_queries_alive() {
 
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
-    let first = system.query::<u32>().unwrap();
+    let first = system.consume::<u32>().unwrap();
 
     system.new_event::<u32>(3).unwrap();
     system.new_event::<u32>(4).unwrap();
-    let second = system.query::<u32>().unwrap();
+    let second = system.consume::<u32>().unwrap();
 
     system.new_event::<u32>(5).unwrap();
 
-    // both queries hold their own events, in any order of dropping them
+    // both hold their own events, in any order of dropping them
     assert_eq!(second.collect::<Vec<_>>(), [3, 4]);
     assert_eq!(first.collect::<Vec<_>>(), [1, 2]);
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [5]);
+    assert_eq!(system.consume::<u32>().unwrap().collect::<Vec<_>>(), [5]);
 }
 
 #[test]
@@ -497,12 +497,12 @@ fn test_batch_empty_polls_between_events_for_every_slot_type() {
     for round in 1..=5u8 {
         // polling without events must not hide events that arrive later
         for _ in 0..3 {
-            assert_eq!(system.query::<u8>().unwrap().len(), 0);
-            assert_eq!(system.query::<u16>().unwrap().len(), 0);
-            assert_eq!(system.query::<u32>().unwrap().len(), 0);
-            assert_eq!(system.query::<u64>().unwrap().len(), 0);
-            assert_eq!(system.query::<i8>().unwrap().len(), 0);
-            assert_eq!(system.query::<i16>().unwrap().len(), 0);
+            assert_eq!(system.consume::<u8>().unwrap().len(), 0);
+            assert_eq!(system.consume::<u16>().unwrap().len(), 0);
+            assert_eq!(system.consume::<u32>().unwrap().len(), 0);
+            assert_eq!(system.consume::<u64>().unwrap().len(), 0);
+            assert_eq!(system.consume::<i8>().unwrap().len(), 0);
+            assert_eq!(system.consume::<i16>().unwrap().len(), 0);
         }
 
         for i in 0..5u8 {
@@ -515,13 +515,13 @@ fn test_batch_empty_polls_between_events_for_every_slot_type() {
         }
 
         let base = round * 10;
-        assert_eq!(system.query::<u8>().unwrap().collect::<Vec<_>>(), [base]);
+        assert_eq!(system.consume::<u8>().unwrap().collect::<Vec<_>>(), [base]);
         assert_eq!(
-            system.query::<u16>().unwrap().collect::<Vec<_>>(),
+            system.consume::<u16>().unwrap().collect::<Vec<_>>(),
             [u16::from(base + 4)]
         );
         assert_eq!(
-            system.query::<u32>().unwrap().collect::<Vec<_>>(),
+            system.consume::<u32>().unwrap().collect::<Vec<_>>(),
             [
                 u32::from(base + 2),
                 u32::from(base + 3),
@@ -529,13 +529,40 @@ fn test_batch_empty_polls_between_events_for_every_slot_type() {
             ]
         );
         assert_eq!(
-            system.query::<u64>().unwrap().collect::<Vec<_>>(),
+            system.consume::<u64>().unwrap().collect::<Vec<_>>(),
             (0..5).map(|i| u64::from(base + i)).collect::<Vec<_>>()
         );
         assert_eq!(
-            system.query::<i8>().unwrap().collect::<Vec<_>>(),
+            system.consume::<i8>().unwrap().collect::<Vec<_>>(),
             [(base + 4) as i8]
         );
-        assert_eq!(system.query::<i16>().unwrap().collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(system.consume::<i16>().unwrap().collect::<Vec<_>>(), [1, 2]);
     }
+}
+
+#[test]
+fn test_batch_consumed_as_slice() {
+    let mut system = EventBackend::default();
+    system.register_store::<u32>(SlotType::All);
+    system.register_store::<u64>(SlotType::Max(3));
+    system.register_store::<i32>(SlotType::Last);
+
+    for i in 0..5 {
+        system.new_event(i as u32).unwrap();
+        system.new_event(i as u64).unwrap();
+        system.new_event(i).unwrap();
+    }
+
+    let mut all = system.consume::<u32>().unwrap();
+    assert_eq!(all.as_slice(), [0, 1, 2, 3, 4]);
+    all.next();
+    assert_eq!(all.as_slice(), [1, 2, 3, 4]);
+
+    // the oldest events were replaced, whatever way the ring buffer wrapped around
+    assert_eq!(system.consume::<u64>().unwrap().as_slice(), [2, 3, 4]);
+
+    assert_eq!(system.consume::<i32>().unwrap().as_slice(), [4]);
+
+    // nothing left
+    assert_eq!(system.consume::<u32>().unwrap().as_slice().len(), 0);
 }

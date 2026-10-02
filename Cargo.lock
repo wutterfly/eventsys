@@ -34,9 +34,9 @@ checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
 
 [[package]]
 name = "anythingy"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "312cacc56c04aeea96b556eb30ee3efea6b48b5b2e0e835d4f7ea7949bd8f654"
+checksum = "abff3ced14a95cf9fba279789a2c8489456f8a7e1c29654b2c1a23da508007a2"
 
 [[package]]
 name = "autocfg"

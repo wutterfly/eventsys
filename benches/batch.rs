@@ -26,9 +26,9 @@ fn events_slot_types(c: &mut Criterion) {
                 i = i.wrapping_add(1);
                 events.new_event::<u64>(black_box(i)).unwrap();
 
-                // drain regularly, so slots that keep everything do not grow without bound
+                // consume regularly, so slots that keep everything do not grow without bound
                 if i & 1023 == 0 {
-                    drop(events.query::<u64>().unwrap());
+                    drop(events.consume::<u64>().unwrap());
                 }
             });
         });
@@ -51,7 +51,7 @@ fn events_idle_poll(c: &mut Criterion) {
         events.register_store::<u64>(typ);
 
         group.bench_function(name, |b| {
-            b.iter(|| black_box(events.query::<u64>().unwrap().count()));
+            b.iter(|| black_box(events.consume::<u64>().unwrap().count()));
         });
     }
 }
@@ -94,8 +94,8 @@ fn events_slot_types_contended(c: &mut Criterion) {
                     }
                 });
 
-                // drain between iterations, so slots that keep everything do not grow without bound
-                drop(events.query::<u64>().unwrap());
+                // consume between iterations, so slots that keep everything do not grow without bound
+                drop(events.consume::<u64>().unwrap());
             });
         });
     }

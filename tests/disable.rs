@@ -29,13 +29,13 @@ fn test_disable_enable() {
 
     // collect triggered events
     let key_events = system
-        .query::<(i32, i32, i32)>()
+        .consume::<(i32, i32, i32)>()
         .unwrap()
         .collect::<Vec<_>>();
 
-    let pair_events = system.query::<(i64, u64)>().unwrap().collect::<Vec<_>>();
+    let pair_events = system.consume::<(i64, u64)>().unwrap().collect::<Vec<_>>();
 
-    let single_events = system.query::<u128>().unwrap().collect::<Vec<_>>();
+    let single_events = system.consume::<u128>().unwrap().collect::<Vec<_>>();
 
     // check triple events
     assert_eq!(&key_events, &[(1, 2, 3), (5, 6, 7)]);
