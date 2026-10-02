@@ -2,22 +2,88 @@ name: Rust
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
   pull_request:
-    branches: [ "master" ]
+    branches: ["master"]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Build (including benches and examples) and test on stable and nightly,
+  # in debug and release mode.
   test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, nightly]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --no-self-update && rustup default ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --all-targets
+      - name: Test
+        run: cargo test
+      - name: Test (release)
+        run: cargo test --release
+
+  # The library must keep building on the oldest supported Rust version.
+  # This is the `rust-version` in Cargo.toml, which is set by `anythingy`'s own
+  # minimum (and the 2024 edition).
+  msrv:
+    name: minimum supported Rust version
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Update
-      run: rustup update nightly
-    - name: Build stable
-      run: cargo build && cargo build --release
-    - name: Run tests stable
-      run: cargo test && cargo test --release
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo +1.88.0 check --lib
+
+  lint:
+    name: fmt, clippy, docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Docs
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # The slots are built on lock-free structures from `anythingy` (`unsafe` code
+  # inside), so the unit tests run under Miri, once, with strict provenance and
+  # alignment checking. Doctests only repeat what the unit tests cover, and the
+  # integration tests exercise the same code through the public API, so both are
+  # skipped to keep this job short.
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup toolchain install nightly --profile minimal --component miri --allow-downgrade --no-self-update && rustup default nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Miri
+        run: cargo miri test --lib
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check

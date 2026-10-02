@@ -12,8 +12,7 @@ fn test_listener_and_store_on_same_type() {
     let seen = Arc::new(Mutex::new(Vec::<u32>::new()));
     {
         let seen = seen.clone();
-        system
-            .register_listener::<u32>(move |event| seen.lock().unwrap().push(*event));
+        system.register_listener::<u32>(move |event| seen.lock().unwrap().push(*event));
     }
     system.register_store::<u32>(SlotType::All);
 
@@ -36,8 +35,7 @@ fn test_store_registered_before_listener() {
     let count = Arc::new(AtomicUsize::new(0));
     {
         let count = count.clone();
-        let n = system
-            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
+        let n = system.register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
         assert_eq!(n, 1);
     }
 
@@ -65,13 +63,11 @@ fn test_listeners_only_receive_matching_type() {
     let i32_count = Arc::new(AtomicUsize::new(0));
     {
         let c = u32_count.clone();
-        system
-            .register_listener::<u32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed));
+        system.register_listener::<u32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed));
     }
     {
         let c = i32_count.clone();
-        system
-            .register_listener::<i32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed));
+        system.register_listener::<i32>(move |_| _ = c.fetch_add(1, Ordering::Relaxed));
     }
 
     system.new_event::<u32>(1).unwrap();
@@ -88,12 +84,10 @@ fn test_panicking_listener_does_not_break_dispatch() {
 
     let count = Arc::new(AtomicUsize::new(0));
 
-    system
-        .register_listener::<u32>(|_| panic!("listener panic (expected in test)"));
+    system.register_listener::<u32>(|_| panic!("listener panic (expected in test)"));
     {
         let count = count.clone();
-        system
-            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
+        system.register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
     }
     system.register_store::<u32>(SlotType::All);
 
@@ -112,8 +106,7 @@ fn test_disable_skips_listeners_and_store() {
     let count = Arc::new(AtomicUsize::new(0));
     {
         let count = count.clone();
-        system
-            .register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
+        system.register_listener::<u32>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
     }
     system.register_store::<u32>(SlotType::All);
 
@@ -187,8 +180,7 @@ fn test_threads_trigger_events() {
     let count = Arc::new(AtomicUsize::new(0));
     {
         let count = count.clone();
-        system
-            .register_listener::<usize>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
+        system.register_listener::<usize>(move |_| _ = count.fetch_add(1, Ordering::Relaxed));
     }
     system.register_store::<usize>(SlotType::All);
 

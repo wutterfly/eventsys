@@ -1,5 +1,7 @@
 use std::{any::TypeId, panic::RefUnwindSafe};
 
+use anythingy::HeapSize;
+
 use crate::backend::Registered;
 
 /// `Registered<T>` never stores a `T` value directly: its listeners live behind `Box<dyn Fn(&T) + ...>`
@@ -12,55 +14,19 @@ const REGISTERED_SIZE: usize = size_of::<Registered<()>>();
 
 /// A `Registered<T>`, type-erased into a fixed-size inline byte buffer, so storing one never needs a separate
 /// heap allocation (`Registered<T>` always fits, see [`REGISTERED_SIZE`]).
-struct Erased(anythingy::Thing<REGISTERED_SIZE>);
-
-// SAFETY: `Erased` only ever holds a `Registered<T>` for some `T: Send + RefUnwindSafe + 'static` (the only thing
-// `Entry::new` ever puts into it). `Registered<T>` is `Sync` for any such `T`:
-//   - its `listener: Vec<Box<dyn Fn(&T) + Sync + ...>>` is `Sync` because the trait object itself requires `Sync`,
-//   - its `slot: Option<Slot<T>>` wraps all storage in a `Mutex`, which provides `Sync` given only `T: Send`,
-//   - `Slot<T>`'s `Cmp`/`AllFilter` variants hold plain `fn` pointers, which are `Sync` regardless of `T`.
-// `anythingy::Thing` itself does not implement `Sync` (it holds its bytes in an `UnsafeCell`), because it cannot
-// know whether an arbitrary caller's erased value is safe to share across threads. Here it is: every value ever
-// erased into an `Erased` is a `Registered<T>`, and reading it from multiple threads via `get_ref` is exactly as
-// sound as reading a `&Registered<T>` normally would be.
-unsafe impl Sync for Erased {}
-
-impl Erased {
-    #[inline]
-    fn new<T>(value: Registered<T>) -> Self
-    where
-        T: Send + RefUnwindSafe + 'static,
-    {
-        Self(anythingy::Thing::new(value))
-    }
-
-    #[inline]
-    fn get_ref<T>(&self) -> &Registered<T>
-    where
-        T: Send + RefUnwindSafe + 'static,
-    {
-        self.0.get_ref()
-    }
-
-    #[inline]
-    fn get_mut<T>(&mut self) -> &mut Registered<T>
-    where
-        T: Send + RefUnwindSafe + 'static,
-    {
-        self.0.get_mut()
-    }
-}
+type Erased = anythingy::SThing<REGISTERED_SIZE>;
 
 /// A registration, plus the operations needed to work on it without knowing its `T`.
 ///
-/// `enable`/`disable`/`cleanup` are plain (non-capturing) function pointers, monomorphized once per `T` at
-/// registration time; calling one just reconstructs the `&Registered<T>`/`&mut Registered<T>` and calls the
-/// matching inherent method.
+/// `enable`/`disable`/`cleanup`/`heap_size` are plain (non-capturing) function pointers, monomorphized once per
+/// `T` at registration time; calling one just reconstructs the `&Registered<T>`/`&mut Registered<T>` and calls
+/// the matching inherent method.
 struct Entry {
     value: Erased,
     enable: fn(&Erased),
     disable: fn(&Erased),
     cleanup: fn(&mut Erased),
+    heap_size: fn(&Erased) -> usize,
 }
 
 impl Entry {
@@ -71,9 +37,12 @@ impl Entry {
     {
         Self {
             value: Erased::new(Registered::<T>::new()),
-            enable: |erased| erased.get_ref::<T>().enable(),
-            disable: |erased| erased.get_ref::<T>().disable(),
-            cleanup: |erased| erased.get_mut::<T>().cleanup(),
+            enable: |erased| erased.get_ref::<Registered<T>>().enable(),
+            disable: |erased| erased.get_ref::<Registered<T>>().disable(),
+            cleanup: |erased| erased.get_mut::<Registered<T>>().cleanup(),
+            // `erased` itself is only heap-allocated if `Registered<T>` didn't fit inline, which it always does
+            // (see `REGISTERED_SIZE`), but it costs nothing to ask rather than assume.
+            heap_size: |erased| erased.heap_size() + erased.get_ref::<Registered<T>>().heap_size(),
         }
     }
 }
@@ -109,7 +78,7 @@ impl RegisteredMap {
         T: Send + RefUnwindSafe + 'static,
     {
         self.position(&TypeId::of::<T>())
-            .map(|i| self.entries[i].value.get_ref::<T>())
+            .map(|i| self.entries[i].value.get_ref::<Registered<T>>())
     }
 
     /// Returns the registration for `T`, creating an empty one if none exists yet.
@@ -126,7 +95,7 @@ impl RegisteredMap {
             self.entries.len() - 1
         });
 
-        self.entries[i].value.get_mut::<T>()
+        self.entries[i].value.get_mut::<Registered<T>>()
     }
 
     #[inline]
@@ -154,6 +123,21 @@ impl RegisteredMap {
     pub const fn len(&self) -> usize {
         self.keys.len()
     }
+
+    /// Counts the heap memory every registered type has allocated: the key/entry tables themselves, plus what
+    /// each registration owns — see [`Registered::heap_size`] and [`crate::slot::Slot::heap_size`] for what that
+    /// includes. Like [`anythingy::EventQueue::heap_size`], which some slots forward to, this walks every
+    /// registration, so it is meant for occasional checks, and the result is a snapshot.
+    #[inline]
+    pub fn heap_size(&self) -> usize {
+        self.keys.heap_size()
+            + self.entries.heap_size()
+            + self
+                .entries
+                .iter()
+                .map(|entry| (entry.heap_size)(&entry.value))
+                .sum::<usize>()
+    }
 }
 
 #[cfg(test)]
@@ -170,14 +154,19 @@ mod tests {
         assert_eq!(size_of::<Registered<()>>(), REGISTERED_SIZE);
         assert_eq!(size_of::<Registered<u8>>(), REGISTERED_SIZE);
         assert_eq!(size_of::<Registered<Big>>(), REGISTERED_SIZE);
-        assert_eq!(size_of::<Registered<Box<dyn Send + Sync>>>(), REGISTERED_SIZE);
+        assert_eq!(
+            size_of::<Registered<Box<dyn Send + Sync>>>(),
+            REGISTERED_SIZE
+        );
     }
 
     #[test]
     fn test_registered_fits_without_boxing() {
         assert!(anythingy::Thing::<REGISTERED_SIZE>::fitting::<Registered<()>>());
         assert!(anythingy::Thing::<REGISTERED_SIZE>::fitting::<Registered<u8>>());
-        assert!(anythingy::Thing::<REGISTERED_SIZE>::fitting::<Registered<Big>>());
+        assert!(anythingy::Thing::<REGISTERED_SIZE>::fitting::<
+            Registered<Big>,
+        >());
         assert!(!anythingy::Thing::<REGISTERED_SIZE>::boxed::<Registered<Big>>());
     }
 }

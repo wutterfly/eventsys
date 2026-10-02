@@ -5,8 +5,7 @@ fn test_disable_enable() {
     let mut system = EventBackend::default();
 
     // Register events
-    system
-        .register_store::<(i32, i32, i32)>(SlotType::All);
+    system.register_store::<(i32, i32, i32)>(SlotType::All);
     system.register_store::<(i64, u64)>(SlotType::All);
     system.register_store::<u128>(SlotType::All);
 
@@ -30,16 +29,13 @@ fn test_disable_enable() {
 
     // collect triggered events
     let key_events = system
-        .query_blocking::<(i32, i32, i32)>()
+        .query::<(i32, i32, i32)>()
         .unwrap()
         .collect::<Vec<_>>();
 
-    let pair_events = system
-        .query_blocking::<(i64, u64)>()
-        .unwrap()
-        .collect::<Vec<_>>();
+    let pair_events = system.query::<(i64, u64)>().unwrap().collect::<Vec<_>>();
 
-    let single_events = system.query_blocking::<u128>().unwrap().collect::<Vec<_>>();
+    let single_events = system.query::<u128>().unwrap().collect::<Vec<_>>();
 
     // check triple events
     assert_eq!(&key_events, &[(1, 2, 3), (5, 6, 7)]);

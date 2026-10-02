@@ -1,13 +1,12 @@
-use std::{
-    panic::RefUnwindSafe,
-    sync::{MutexGuard, atomic::AtomicBool},
-};
+use std::{panic::RefUnwindSafe, sync::atomic::AtomicBool};
+
+use anythingy::HeapSize;
 
 use crate::{
     err::{EventError, Value},
     map::RegisteredMap,
-    query::{Query, UnblockingQuery},
-    slot::{Slot, SlotType, Store},
+    query::UnblockingQuery,
+    slot::{Slot, SlotType},
 };
 
 /// System to register events and event listeners as well as dispatch and query events.
@@ -29,7 +28,7 @@ impl EventBackend {
         }
     }
 
-    /// Registers a new type of event. Registered events can be quarried in a batch.
+    /// Registers a new type of event. Registered events can be queried in a batch.
     ///
     /// # Example
     /// ```rust
@@ -44,7 +43,7 @@ impl EventBackend {
     where
         T: Send + RefUnwindSafe + 'static,
     {
-        self.registered.entry::<T>().slot = Some(Slot::new(typ));
+        self.registered.entry::<T>().slot = Some(Box::new(Slot::new(typ)));
     }
 
     /// Registers a function that gets called, if an event with the matching type is triggered.
@@ -131,44 +130,7 @@ impl EventBackend {
             |registed| {
                 registed.slot().map_or_else(
                     || Err(EventError::registered_without_store()),
-                    |slot| Ok(UnblockingQuery::new(slot)),
-                )
-            },
-        )
-    }
-
-    /// Returns an iterator over each event with the matching event type.
-    ///
-    /// # Warning
-    /// Holding the query will block access to this event type, but will not clone the underlying data. For not-blocking but cloning query, see [`EventBackend::query`].
-    ///
-    /// # Errors
-    /// Returns an `UnregisteredEventType` error, if the given type was not registered as event type.
-    /// Returns an `RegisteredWithoutStore` error, if the queried type is not registered to store events.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use eventsys::{EventBackend, SlotType};
-    /// # fn main() {
-    /// # let mut system = EventBackend::default();
-    /// # system.register_store::<u32>(SlotType::All);
-    /// let query = system.query_blocking::<u32>().unwrap();
-    ///
-    /// for event in query {
-    ///     // handle event
-    /// }
-    /// # }
-    /// ```
-    pub fn query_blocking<T>(&self) -> Result<Query<'_, T>, EventError<T>>
-    where
-        T: Send + RefUnwindSafe + 'static,
-    {
-        self.registered.get::<T>().map_or_else(
-            || Err(EventError::unregisted_event_empty()),
-            |registed| {
-                registed.events().map_or_else(
-                    || Err(EventError::registered_without_store()),
-                    |events| Ok(Query::new(events)),
+                    |slot| Ok(slot.query_owned()),
                 )
             },
         )
@@ -280,10 +242,28 @@ impl std::fmt::Debug for EventBackend {
     }
 }
 
+impl HeapSize for EventBackend {
+    /// Counts the heap memory every registered event type has allocated: the registration tables, each type's
+    /// listeners, and each type's stored events.
+    ///
+    /// Follows [`HeapSize`]'s own rules: this is what `EventBackend` and its registrations have allocated for
+    /// themselves, not what the events or listeners stored inside own in turn (a `Vec<String>` of events counts
+    /// the `Vec`'s buffer, not the text each `String` points to), and it is a best-effort snapshot rather than an
+    /// exact account, since some of what it walks (an `anythingy::EventQueue`-backed `All`/`AllFilter` slot) is a
+    /// snapshot itself.
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.registered.heap_size()
+    }
+}
+
 type Listener<T> = Box<dyn Fn(&T) + Sync + RefUnwindSafe + Send>;
 
 pub struct Registered<T> {
-    slot: Option<Slot<T>>,
+    // boxed once at registration, not per event: this keeps `Registered<T>`'s own size independent of `T`, which
+    // `RegisteredMap`'s inline type erasure (`anythingy::Thing`) relies on. `Slot<T>` itself is not size-independent
+    // of `T` (every variant stores `T` inline, behind a `Mutex` or `EventQueue`).
+    slot: Option<Box<Slot<T>>>,
     listener: Vec<Listener<T>>,
     enabled: AtomicBool,
 }
@@ -320,13 +300,8 @@ where
     }
 
     #[inline]
-    pub(crate) const fn slot(&self) -> Option<&Slot<T>> {
-        self.slot.as_ref()
-    }
-
-    #[inline]
-    pub(crate) fn events(&self) -> Option<MutexGuard<'_, Store<T>>> {
-        self.slot.as_ref().map(Slot::events)
+    pub(crate) fn slot(&self) -> Option<&Slot<T>> {
+        self.slot.as_deref()
     }
 
     #[inline]
@@ -348,6 +323,18 @@ where
         if let Some(slot) = &mut self.slot {
             slot.cleanup();
         }
+    }
+
+    /// Counts the heap memory this registration has allocated: the listener buffer, the boxed slot itself (sized
+    /// like `Box<T>::heap_size`, i.e. the allocation that holds it, not what it owns), and whatever that slot has
+    /// allocated beyond that — see [`Slot::heap_size`].
+    #[inline]
+    pub(crate) fn heap_size(&self) -> usize {
+        self.listener.heap_size()
+            + self
+                .slot
+                .as_deref()
+                .map_or(0, |slot| size_of_val(slot) + slot.heap_size())
     }
 }
 
@@ -391,8 +378,8 @@ mod tests {
 
     #[test]
     fn test_event_backend_is_send_sync() {
-        // `Registered<T>` gets type-erased into a `Thing`, backed by an `unsafe impl Sync` in `map.rs`; this
-        // guards that `EventBackend` actually stays usable across threads if that ever regresses.
+        // `Registered<T>` gets type-erased into an `SThing`, which only accepts `Send + Sync` values; this guards
+        // that `EventBackend` actually stays usable across threads if that ever regresses.
         const fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<EventBackend>();
     }
@@ -405,5 +392,105 @@ mod tests {
         assert_eq!(count, 1);
 
         events.register_store::<u32>(crate::SlotType::First);
+    }
+
+    #[test]
+    fn test_heap_size_empty_backend_is_zero() {
+        use anythingy::HeapSize;
+
+        assert_eq!(EventBackend::new().heap_size(), 0);
+    }
+
+    #[test]
+    fn test_heap_size_grows_after_registering_listener() {
+        use anythingy::HeapSize;
+
+        let mut events = EventBackend::new();
+        assert_eq!(events.heap_size(), 0);
+
+        events.register_listener::<u32>(const_listener);
+        // the registration tables (keys/entries) and the listener's own buffer both allocate
+        assert!(events.heap_size() > 0);
+    }
+
+    #[test]
+    fn test_heap_size_single_slot_contributes_nothing_regardless_of_pushes() {
+        use anythingy::HeapSize;
+
+        let mut events = EventBackend::new();
+        events.register_store::<u32>(crate::SlotType::First);
+        let before = events.heap_size();
+
+        for i in 0..100u32 {
+            events.new_event(i).unwrap();
+        }
+
+        // `Single` (`First`/`Cmp`) stores its value inline in a `Mutex<Option<T>>`, so pushing never allocates
+        assert_eq!(events.heap_size(), before);
+    }
+
+    #[test]
+    fn test_heap_size_last_slot_is_constant_regardless_of_pushes() {
+        use anythingy::HeapSize;
+
+        let mut events = EventBackend::new();
+        events.register_store::<u32>(crate::SlotType::Last);
+        let before = events.heap_size();
+        assert!(before > 0, "`AtomicSlot` allocates its two boxes up front");
+
+        for i in 0..1_000u32 {
+            events.new_event(i).unwrap();
+        }
+
+        // `AtomicSlot` allocates its two boxes once, in `new`; pushing only ever swaps values into them
+        assert_eq!(events.heap_size(), before);
+    }
+
+    #[test]
+    fn test_heap_size_grows_with_stored_all_events() {
+        use anythingy::HeapSize;
+
+        let mut events = EventBackend::new();
+        events.register_store::<u32>(crate::SlotType::All);
+        let before = events.heap_size();
+
+        for i in 0..1_000u32 {
+            events.new_event(i).unwrap();
+        }
+
+        // the `EventQueue`'s per-thread buffer grows to hold the pushed events
+        assert!(events.heap_size() > before);
+    }
+
+    #[test]
+    fn test_heap_size_grows_with_stored_max_events() {
+        use anythingy::HeapSize;
+
+        let mut events = EventBackend::new();
+        events.register_store::<u32>(crate::SlotType::Max(1_000));
+        let before = events.heap_size();
+
+        for i in 0..1_000u32 {
+            events.new_event(i).unwrap();
+        }
+
+        // the `Mutex<VecDeque<T>>` buffer grows to hold the pushed events
+        assert!(events.heap_size() > before);
+    }
+
+    #[test]
+    fn test_heap_size_shrinks_after_cleanup() {
+        use anythingy::HeapSize;
+
+        let mut events = EventBackend::new();
+        events.register_store::<u32>(crate::SlotType::All);
+        for i in 0..1_000u32 {
+            events.new_event(i).unwrap();
+        }
+        let before = events.heap_size();
+
+        events.cleanup();
+
+        assert!(events.heap_size() < before);
     }
 }

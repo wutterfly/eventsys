@@ -11,7 +11,7 @@
 //! ## Using an [`EventBackend`]
 //!
 //! Using an [`EventBackend`] should generally be done in 2 phases:
-//!    * Create an new [`EventBackend`] and register all events
+//!    * Create a new [`EventBackend`] and register all events
 //!    * Use the [`EventBackend`] to trigger new events
 //!
 //! Events can be triggered without needing mutable access to the [`EventBackend`],
@@ -43,7 +43,7 @@
 //! ## Batching
 //!
 //! Sometimes it is not desired to process events right away. The second way to handle events is to store them
-//! and proccess them as batch.
+//! and process them as batch.
 //!
 //! ### Example Batching
 //!
@@ -75,6 +75,7 @@
 
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
+#![warn(clippy::cargo)]
 #![allow(clippy::module_name_repetitions)]
 
 mod backend;

@@ -5,17 +5,13 @@ fn test_batch() {
     let mut system = EventBackend::default();
 
     // Register events
-    system
-        .register_store::<Box<(i32, i32, i32)>>(SlotType::All);
-    system
-        .register_store::<(i64, u64)>(SlotType::First);
+    system.register_store::<Box<(i32, i32, i32)>>(SlotType::All);
+    system.register_store::<(i64, u64)>(SlotType::First);
     system.register_store::<u128>(SlotType::Last);
 
-    system
-        .register_store::<u32>(SlotType::Cmp(|current, next| *next > 2 * current));
+    system.register_store::<u32>(SlotType::Cmp(|current, next| *next > 2 * current));
 
-    system
-        .register_store::<u64>(SlotType::AllFilter(|next| *next >= 50));
+    system.register_store::<u64>(SlotType::AllFilter(|next| *next >= 50));
 
     // call all events
     system
@@ -45,21 +41,18 @@ fn test_batch() {
 
     // collect triggered events
     let all_events = system
-        .query_blocking::<Box<(i32, i32, i32)>>()
+        .query::<Box<(i32, i32, i32)>>()
         .unwrap()
         .map(|x| *x)
         .collect::<Vec<_>>();
 
-    let first_events = system
-        .query_blocking::<(i64, u64)>()
-        .unwrap()
-        .collect::<Vec<_>>();
+    let first_events = system.query::<(i64, u64)>().unwrap().collect::<Vec<_>>();
 
-    let last_events = system.query_blocking::<u128>().unwrap().collect::<Vec<_>>();
+    let last_events = system.query::<u128>().unwrap().collect::<Vec<_>>();
 
-    let cmp_events = system.query_blocking::<u32>().unwrap().collect::<Vec<_>>();
+    let cmp_events = system.query::<u32>().unwrap().collect::<Vec<_>>();
 
-    let filter_events = system.query_blocking::<u64>().unwrap().collect::<Vec<_>>();
+    let filter_events = system.query::<u64>().unwrap().collect::<Vec<_>>();
 
     // check all events
     assert_eq!(&all_events, &[(1, 2, 3), (5, 6, 7)]);
@@ -88,7 +81,7 @@ fn test_batch_max() {
     }
 
     // only the newest 3 events are kept, oldest first
-    let events = system.query_blocking::<u32>().unwrap().collect::<Vec<_>>();
+    let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&events, &[7, 8, 9]);
 }
 
@@ -102,7 +95,7 @@ fn test_batch_max_not_reached() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let events = system.query_blocking::<u32>().unwrap().collect::<Vec<_>>();
+    let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&events, &[0, 1, 2, 3, 4]);
 }
 
@@ -116,7 +109,7 @@ fn test_batch_max_one() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let events = system.query_blocking::<u32>().unwrap().collect::<Vec<_>>();
+    let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&events, &[9]);
 }
 
@@ -130,7 +123,7 @@ fn test_batch_max_zero_stores_nothing() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let query = system.query_blocking::<u32>().unwrap();
+    let query = system.query::<u32>().unwrap();
     assert_eq!(query.len(), 0);
     assert_eq!(query.count(), 0);
 }
@@ -143,16 +136,16 @@ fn test_batch_query_drains() {
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
 
-    let first = system.query_blocking::<u32>().unwrap().collect::<Vec<_>>();
+    let first = system.query::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&first, &[1, 2]);
 
     // events were consumed, second query is empty
-    let second = system.query_blocking::<u32>().unwrap().collect::<Vec<_>>();
+    let second = system.query::<u32>().unwrap().collect::<Vec<_>>();
     assert!(second.is_empty());
 
     // new events can be stored after draining
     system.new_event::<u32>(3).unwrap();
-    let third = system.query_blocking::<u32>().unwrap().collect::<Vec<_>>();
+    let third = system.query::<u32>().unwrap().collect::<Vec<_>>();
     assert_eq!(&third, &[3]);
 }
 
@@ -186,8 +179,7 @@ fn test_batch_query_unblocking_slot_types() {
     system.register_store::<u8>(SlotType::First);
     system.register_store::<u16>(SlotType::Last);
     system.register_store::<u32>(SlotType::Max(2));
-    system
-        .register_store::<u64>(SlotType::AllFilter(|new| new % 2 == 0));
+    system.register_store::<u64>(SlotType::AllFilter(|new| new % 2 == 0));
 
     for i in 1..=5 {
         system.new_event::<u8>(i).unwrap();
@@ -298,19 +290,6 @@ fn test_batch_query_size_hint() {
         system.new_event::<u32>(i).unwrap();
     }
 
-    let mut query = system.query_blocking::<u32>().unwrap();
-    assert_eq!(query.size_hint(), (5, Some(5)));
-    assert_eq!(query.len(), 5);
-
-    query.next();
-    assert_eq!(query.size_hint(), (4, Some(4)));
-    assert_eq!(query.len(), 4);
-    drop(query);
-
-    for i in 0..5u32 {
-        system.new_event::<u32>(i).unwrap();
-    }
-
     let mut query = system.query::<u32>().unwrap();
     assert_eq!(query.size_hint(), (5, Some(5)));
     assert_eq!(query.len(), 5);
@@ -325,18 +304,10 @@ fn test_batch_first_accepts_new_event_after_every_kind_of_drain() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::First);
 
-    // drained by query_blocking
+    // drained by query
     system.new_event::<u32>(1).unwrap();
     system.new_event::<u32>(2).unwrap();
-    assert_eq!(
-        system.query_blocking::<u32>().unwrap().collect::<Vec<_>>(),
-        [1]
-    );
-
-    // drained by query
-    system.new_event::<u32>(3).unwrap();
-    system.new_event::<u32>(4).unwrap();
-    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [3]);
+    assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [1]);
 
     // drained by cleanup
     system.new_event::<u32>(5).unwrap();
@@ -346,9 +317,10 @@ fn test_batch_first_accepts_new_event_after_every_kind_of_drain() {
     system.new_event::<u32>(8).unwrap();
     assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [7]);
 
-    // query without any consumed event still resets the slot
+    // query without any consumed event still resets the slot: every query is all-or-nothing, so merely
+    // acquiring and dropping one discards whatever was pending, even unread
     system.new_event::<u32>(9).unwrap();
-    drop(system.query_blocking::<u32>().unwrap());
+    drop(system.query::<u32>().unwrap());
     system.new_event::<u32>(10).unwrap();
     assert_eq!(system.query::<u32>().unwrap().collect::<Vec<_>>(), [10]);
 }
@@ -380,6 +352,71 @@ fn test_batch_first_threads_keep_exactly_one() {
 }
 
 #[test]
+fn test_batch_last_threads_overwrite() {
+    const THREADS: u32 = 8;
+    const PER_THREAD: u32 = 1_000;
+
+    let mut system = EventBackend::new();
+    system.register_store::<u32>(SlotType::Last);
+
+    for round in 0..3 {
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let system = &system;
+                s.spawn(move || {
+                    for i in 0..PER_THREAD {
+                        system.new_event::<u32>(t * PER_THREAD + i).unwrap();
+                    }
+                });
+            }
+        });
+
+        // exactly one event is kept per round, no matter which thread wrote last
+        let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
+        assert_eq!(events.len(), 1, "round {round}");
+        assert!(events[0] < THREADS * PER_THREAD, "round {round}");
+    }
+}
+
+#[test]
+fn test_batch_last_threads_with_pointer_shaped_payload() {
+    // regression test: `Last` used to be backed by a `crossbeam_utils::atomic::AtomicCell<Option<T>>`, which
+    // Miri caught moving a pointer-shaped `T` (like `Arc<X>`) through a plain integer atomic on overwrite,
+    // stripping its provenance and making the dropped old value a dangling reference. `Arc` is exactly the
+    // shape that broke: `Option<Arc<X>>` is pointer-width, so it took the atomic's fast path instead of its
+    // lock-based fallback for larger types.
+    const THREADS: usize = 8;
+    const PER_THREAD: usize = 1_000;
+
+    let mut system = EventBackend::new();
+    system.register_store::<std::sync::Arc<usize>>(SlotType::Last);
+
+    for round in 0..3 {
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let system = &system;
+                s.spawn(move || {
+                    for i in 0..PER_THREAD {
+                        system
+                            .new_event(std::sync::Arc::new(t * PER_THREAD + i))
+                            .unwrap();
+                    }
+                });
+            }
+        });
+
+        // exactly one event survives per round, and it is a value that was actually pushed
+        let events = system
+            .query::<std::sync::Arc<usize>>()
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1, "round {round}");
+        assert!(*events[0] < THREADS * PER_THREAD, "round {round}");
+        assert_eq!(std::sync::Arc::strong_count(&events[0]), 1, "round {round}");
+    }
+}
+
+#[test]
 fn test_batch_query_many_batches() {
     let mut system = EventBackend::default();
     system.register_store::<u32>(SlotType::All);
@@ -396,11 +433,7 @@ fn test_batch_query_many_batches() {
             system.new_event::<u32>(*value).unwrap();
         }
 
-        let events = if round % 2 == 0 {
-            system.query::<u32>().unwrap().collect::<Vec<_>>()
-        } else {
-            system.query_blocking::<u32>().unwrap().collect::<Vec<_>>()
-        };
+        let events = system.query::<u32>().unwrap().collect::<Vec<_>>();
 
         assert_eq!(events, expected, "round {round}");
     }
@@ -458,10 +491,8 @@ fn test_batch_empty_polls_between_events_for_every_slot_type() {
     system.register_store::<u16>(SlotType::Last);
     system.register_store::<u32>(SlotType::Max(3));
     system.register_store::<u64>(SlotType::All);
-    system
-        .register_store::<i8>(SlotType::Cmp(|current, new| new > current));
-    system
-        .register_store::<i16>(SlotType::AllFilter(|new| *new > 0));
+    system.register_store::<i8>(SlotType::Cmp(|current, new| new > current));
+    system.register_store::<i16>(SlotType::AllFilter(|new| *new > 0));
 
     for round in 1..=5u8 {
         // polling without events must not hide events that arrive later

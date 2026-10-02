@@ -20,6 +20,8 @@ fn test_listeners() {
     // Setup single event listener
     {
         let state_boxed_c = state_boxed.clone();
+        // the event type is `Box<str>`, so a listener takes `&Box<str>`; `&str` would be a different event type
+        #[allow(clippy::borrowed_box)]
         let listener = move |event: &Box<str>| {
             state_boxed_c.lock().unwrap().push(event.clone());
         };

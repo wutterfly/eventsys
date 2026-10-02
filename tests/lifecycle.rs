@@ -18,7 +18,7 @@ fn test_stored_events_are_alive_until_queried() {
     }
     assert_eq!(Arc::strong_count(&probe), 4);
 
-    let mut query = system.query_blocking::<Arc<()>>().unwrap();
+    let mut query = system.query::<Arc<()>>().unwrap();
     let taken = query.next().unwrap();
     assert_eq!(Arc::strong_count(&probe), 4);
 
@@ -83,8 +83,7 @@ fn test_first_slot_drops_rejected_events() {
 #[test]
 fn test_filter_slot_drops_rejected_events() {
     let mut system = EventBackend::default();
-    system
-        .register_store::<Arc<()>>(SlotType::AllFilter(|_| false));
+    system.register_store::<Arc<()>>(SlotType::AllFilter(|_| false));
 
     let probe = Arc::new(());
 
@@ -164,8 +163,7 @@ fn test_cleanup_drops_listeners() {
     let probe = Arc::new(());
     {
         let probe = probe.clone();
-        system
-            .register_listener::<u32>(move |_| _ = &probe);
+        system.register_listener::<u32>(move |_| _ = &probe);
     }
     assert_eq!(Arc::strong_count(&probe), 2);
 

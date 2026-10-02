@@ -28,9 +28,6 @@ fn test_query_unregistered() {
 
     let err = system.query::<u32>().err().unwrap();
     assert!(err.to_string().contains("Unregistered event type"));
-
-    let err = system.query_blocking::<u32>().err().unwrap();
-    assert!(err.to_string().contains("Unregistered event type"));
 }
 
 #[test]
@@ -39,9 +36,6 @@ fn test_query_registered_without_store() {
     system.register_listener::<u32>(|_| {});
 
     let err = system.query::<u32>().err().unwrap();
-    assert!(err.to_string().contains("not registered to store events"));
-
-    let err = system.query_blocking::<u32>().err().unwrap();
     assert!(err.to_string().contains("not registered to store events"));
 }
 

@@ -79,7 +79,7 @@ fn trigger_frame(events: &Backend, frame: u32) {
         events
             .new_event(MouseButton {
                 button: i,
-                pressed: frame % 2 == 0,
+                pressed: frame.is_multiple_of(2),
             })
             .unwrap();
     }
@@ -102,7 +102,7 @@ fn trigger_frame(events: &Backend, frame: u32) {
             .unwrap();
     }
 
-    if frame % 64 == 0 {
+    if frame.is_multiple_of(64) {
         events
             .new_event(Resize {
                 w: 1920,
@@ -165,16 +165,6 @@ fn frame(c: &mut Criterion) {
             n = n.wrapping_add(1);
             trigger_frame(&events, n);
             consume_frame!(&events, query)
-        });
-    });
-
-    let events = frame_backend();
-    let mut n = 0u32;
-    group.bench_function("busy/query_blocking", |b| {
-        b.iter(|| {
-            n = n.wrapping_add(1);
-            trigger_frame(&events, n);
-            consume_frame!(&events, query_blocking)
         });
     });
 

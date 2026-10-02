@@ -1,81 +1,45 @@
-use std::{collections::VecDeque, marker::PhantomData, sync::MutexGuard};
+use std::collections::VecDeque;
 
-use crate::slot::{Slot, Store};
+use crate::slot::Slot;
 
+/// An iterator over events from type `T`, taken from the slot up front (a snapshot at construction time).
 #[derive(Debug)]
-/// An iterator over events from type `T`.
-pub struct Query<'a, T> {
-    events: MutexGuard<'a, Store<T>>,
-}
+pub enum UnblockingQuery<'a, T> {
+    /// `All`, `AllFilter`, `Cmp`, `Max`, `First` — the whole batch, swapped out of the slot at construction. The
+    /// buffer is handed back to the slot for reuse when this is dropped.
+    Owned {
+        events: VecDeque<T>,
+        slot: &'a Slot<T>,
+    },
 
-impl<'a, T> Query<'a, T> {
-    /// Creates a new `Query` to iterate over events from type `T`.
-    #[inline]
-    pub(crate) const fn new(events: MutexGuard<'a, Store<T>>) -> Self {
-        Self { events }
-    }
-
-    #[inline]
-    /// Returns the number of events this `Query` can produce.
-    pub fn len(&self) -> usize {
-        self.events.len()
-    }
-}
-
-impl<T> Iterator for Query<'_, T> {
-    type Item = T;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.events.pop_front()
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.events.len();
-        (len, Some(len))
-    }
-}
-
-impl<T> ExactSizeIterator for Query<'_, T> {}
-
-impl<T> Drop for Query<'_, T> {
-    #[inline]
-    fn drop(&mut self) {
-        self.events.clear();
-    }
-}
-
-// ############################
-// ############################
-// ############################
-
-#[derive(Debug)]
-/// An iterator over events from type `T`.
-pub struct UnblockingQuery<'a, T> {
-    events: VecDeque<T>,
-
-    /// The slot the events were taken from. Gets the buffer back, after all events are consumed.
-    slot: &'a Slot<T>,
-
-    _t: PhantomData<T>,
+    /// `Last` — the at-most-one pending event, already taken out of the slot at construction.
+    Taken(Option<T>),
 }
 
 impl<'a, T> UnblockingQuery<'a, T> {
     #[inline]
-    /// Creates a new `Query` to iterate over the events, that are currently stored in the slot.
-    pub(crate) fn new(slot: &'a Slot<T>) -> Self {
-        Self {
-            events: slot.events_clone(),
-            slot,
-            _t: PhantomData,
-        }
+    pub(crate) const fn owned(events: VecDeque<T>, slot: &'a Slot<T>) -> Self {
+        Self::Owned { events, slot }
+    }
+
+    #[inline]
+    pub(crate) const fn taken(value: Option<T>) -> Self {
+        Self::Taken(value)
     }
 
     #[inline]
     /// Returns the number of events this `Query` can produce.
     pub fn len(&self) -> usize {
-        self.events.len()
+        match self {
+            Self::Owned { events, .. } => events.len(),
+            Self::Taken(value) => usize::from(value.is_some()),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -84,12 +48,15 @@ impl<T> Iterator for UnblockingQuery<'_, T> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.events.pop_front()
+        match self {
+            Self::Owned { events, .. } => events.pop_front(),
+            Self::Taken(value) => value.take(),
+        }
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.events.len();
+        let len = self.len();
         (len, Some(len))
     }
 }
@@ -99,10 +66,22 @@ impl<T> ExactSizeIterator for UnblockingQuery<'_, T> {}
 impl<T> Drop for UnblockingQuery<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        // drop all events that were not consumed
-        self.events.clear();
+        // drop all events that were not consumed, then hand the buffer back for reuse
+        if let Self::Owned { events, slot } = self {
+            events.clear();
+            slot.recycle(std::mem::take(events));
+        }
+    }
+}
 
-        // the slot can use the buffer again
-        self.slot.recycle(std::mem::take(&mut self.events));
+#[cfg(test)]
+impl<T> UnblockingQuery<'_, T> {
+    /// Test-only: inspects the taken buffer's capacity, to check the recycling behavior of `All`/`AllFilter`/
+    /// `Cmp`/`Max`/`First`. Not meaningful for `Last`, which never allocates a buffer.
+    pub(crate) fn capacity(&self) -> usize {
+        match self {
+            Self::Owned { events, .. } => events.capacity(),
+            Self::Taken(_) => 0,
+        }
     }
 }

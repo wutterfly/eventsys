@@ -71,7 +71,7 @@ fn main() {
         .unwrap();
 
     // query mouse event
-    for mouse_events in get_events().query_blocking::<MouseEvent>().unwrap() {
+    for mouse_events in get_events().query::<MouseEvent>().unwrap() {
         println!("Batched event: {mouse_events:?}");
     }
 }

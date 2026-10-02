@@ -17,8 +17,7 @@ fn events_listener_count(c: &mut Criterion) {
         let mut events = Backend::new();
 
         for _ in 0..count {
-            events
-                .register_listener::<f64>(|event| raw(*event));
+            events.register_listener::<f64>(|event| raw(*event));
         }
 
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {

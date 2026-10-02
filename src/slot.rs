@@ -2,12 +2,16 @@ use std::{
     collections::VecDeque,
     ops::{Deref, DerefMut},
     sync::{
-        Mutex, MutexGuard, PoisonError,
+        Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-/// The stored events of a [`Slot`].
+use anythingy::{AtomicSlot, EventQueue, HeapSize};
+
+use crate::query::UnblockingQuery;
+
+/// The stored events of a [`Slot::Store`] or [`Slot::Queue`] slot.
 ///
 /// Dereferences to the stored events.
 #[derive(Debug)]
@@ -27,6 +31,25 @@ impl<T> Store<T> {
             spare: None,
         }
     }
+
+    /// Takes whichever recycled buffer is available (`spare` preferred, then whatever `events` currently holds),
+    /// leaving an empty one behind.
+    ///
+    /// Only used by [`Slot::Queue`], which has nothing of its own to accumulate into between pushes — events live
+    /// in the lock-free [`EventQueue`] instead, so `events` and `spare` here are just recycled capacity waiting
+    /// to be reused as the destination for the next drain.
+    #[inline]
+    fn take_scratch(&mut self) -> VecDeque<T> {
+        self.spare
+            .take()
+            .unwrap_or_else(|| std::mem::take(&mut self.events))
+    }
+
+    /// Counts the ring buffer, plus the spare buffer kept for the next batch, if there is one.
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.events.heap_size() + self.spare.as_ref().map_or(0, VecDeque::heap_size)
+    }
 }
 
 impl<T> Deref for Store<T> {
@@ -45,49 +68,129 @@ impl<T> DerefMut for Store<T> {
     }
 }
 
-enum Kind<T> {
-    All,
-    Last,
+/// What a [`Slot::Single`] slot does with a pushed event.
+pub enum SingleKind<T> {
+    /// Keep the first event until consumed, reject everything else.
     First,
+    /// A user function decides whether the new event replaces the currently stored one.
     Cmp(fn(&T, &T) -> bool),
-    AllFilter(fn(&T) -> bool),
-    Max(usize),
 }
 
-pub struct Slot<T> {
-    store: Mutex<Store<T>>,
+/// The event queue behind one registered type.
+///
+/// `First` and `Cmp` never hold more than one event, so they share a `Mutex<Option<T>>` with no `VecDeque` at
+/// all — nothing to allocate, grow, or recycle. `Max` is the only `Store`-like kind that can hold more than one
+/// event at once, so it keeps the `Mutex<VecDeque<T>>` with a recycled spare buffer. `Last` also never holds more
+/// than one event, but needs no lock at all — see [`AtomicSlot`], a general-purpose primitive that (unlike
+/// `Single`/`Store`/`Queue`'s `Mutex`/`EventQueue`) doesn't track its own emptiness, so `filled` lives here
+/// instead, same as for every other kind.
+///
+/// `All` and `AllFilter` push into a lock-free `anythingy::EventQueue<T>` instead: pushing never waits on other
+/// producer threads at all (no shared lock, unlike `Single`/`Store`), which fits them better since — unlike
+/// `First`, `Cmp` and `Max` — nothing about them ever needs to reject or compare against what is already stored.
+/// A query drains the queue into the `Mutex<Store<T>>`'s recycled buffer; since 0.3.2, `EventQueue` itself never
+/// throws away a producer thread's buffer capacity on drain, so this stays allocation-free after warm-up, same
+/// as `Store`. The trade-off: cross-thread push order is no longer guaranteed (only per-thread order is).
+pub enum Slot<T> {
+    /// `First`, `Cmp`.
+    Single {
+        cell: Mutex<Option<T>>,
 
-    /// Set, while events are stored. Lets other threads skip locking, if there is nothing to do.
-    ///
-    /// Only changed while holding the lock of `store`. Set to `true` when an event gets stored and reset to `false`
-    /// whenever the events get accessed for consumption. That way `true` always means an event is stored (until the
-    /// events are consumed) and `false` means there is nothing to consume. Consumers always have to remove all events,
-    /// before releasing the lock.
-    ///
-    /// Reading `false` without holding the lock, can miss an event that is stored at the same moment. Such an event
-    /// simply is part of the next batch.
-    filled: AtomicBool,
+        /// Set, while an event is stored. Lets other threads skip locking, if there is nothing to do.
+        ///
+        /// Only changed while holding the lock of `cell`. Set to `true` when an event gets stored and reset to
+        /// `false` whenever the event gets accessed for consumption. That way `true` always means an event is
+        /// stored (until it is consumed) and `false` means there is nothing to consume.
+        ///
+        /// Reading `false` without holding the lock, can miss an event that is stored at the same moment. Such
+        /// an event simply is part of the next batch.
+        filled: AtomicBool,
 
-    kind: Kind<T>,
+        kind: SingleKind<T>,
+    },
+
+    /// `Max`.
+    Store {
+        store: Mutex<Store<T>>,
+
+        /// Same idea as [`Slot::Single`]'s `filled`.
+        filled: AtomicBool,
+
+        max: usize,
+    },
+
+    /// `All`, `AllFilter` (`filter` is `None` for `All`).
+    Queue {
+        queue: EventQueue<T>,
+
+        /// Same idea as [`Slot::Single`]'s `filled`, but set right after a lock-free push, without holding any
+        /// lock at all.
+        filled: AtomicBool,
+
+        /// Never touched by `push`; only used at query time, to stage a drained batch.
+        store: Mutex<Store<T>>,
+
+        filter: Option<fn(&T) -> bool>,
+    },
+
+    /// `Last` — fully lock-free, see [`AtomicSlot`].
+    Last {
+        cell: AtomicSlot<T>,
+
+        /// Same idea as [`Slot::Single`]'s `filled`, but set right after a lock-free push, without holding any
+        /// lock at all. `AtomicSlot` itself has no such flag (a fast "is there anything to take" hint is not
+        /// every caller's trade-off to make), so `Slot` keeps it, same as for `Store`/`Queue`.
+        filled: AtomicBool,
+    },
 }
 
-impl<T> Slot<T> {
+impl<T: Send> Slot<T> {
     #[inline]
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(typ: SlotType<T>) -> Self {
-        let (kind, capacity) = match typ {
-            SlotType::All => (Kind::All, 64),
-            SlotType::Last => (Kind::Last, 1),
-            SlotType::First => (Kind::First, 1),
-            SlotType::Cmp(cmp) => (Kind::Cmp(cmp), 1),
-            SlotType::AllFilter(filter) => (Kind::AllFilter(filter), 32),
-            SlotType::Max(max) => (Kind::Max(max), max / 2),
-        };
+        match typ {
+            SlotType::All => Self::new_queue(64, None),
+            SlotType::AllFilter(filter) => Self::new_queue(32, Some(filter)),
+            SlotType::First => Self::new_single(SingleKind::First),
+            SlotType::Cmp(cmp) => Self::new_single(SingleKind::Cmp(cmp)),
+            SlotType::Max(max) => Self::new_store(max),
+            SlotType::Last => Self::new_last(),
+        }
+    }
 
-        Self {
-            store: Mutex::new(Store::new(VecDeque::with_capacity(capacity))),
+    #[inline]
+    const fn new_single(kind: SingleKind<T>) -> Self {
+        Self::Single {
+            cell: Mutex::new(None),
             filled: AtomicBool::new(false),
             kind,
+        }
+    }
+
+    #[inline]
+    fn new_store(max: usize) -> Self {
+        Self::Store {
+            store: Mutex::new(Store::new(VecDeque::with_capacity(max / 2))),
+            filled: AtomicBool::new(false),
+            max,
+        }
+    }
+
+    #[inline]
+    fn new_queue(capacity: usize, filter: Option<fn(&T) -> bool>) -> Self {
+        Self::Queue {
+            queue: EventQueue::new(),
+            filled: AtomicBool::new(false),
+            store: Mutex::new(Store::new(VecDeque::with_capacity(capacity))),
+            filter,
+        }
+    }
+
+    #[inline]
+    fn new_last() -> Self {
+        Self::Last {
+            cell: AtomicSlot::new(),
+            filled: AtomicBool::new(false),
         }
     }
 
@@ -95,57 +198,48 @@ impl<T> Slot<T> {
     // `filled` must only change while holding the lock, so the guard has to stay alive until then
     #[allow(clippy::significant_drop_tightening)]
     pub fn push(&self, value: T) {
-        // check if the event can be discarded, without locking
-        match &self.kind {
-            // an event is already stored, nothing to do
-            Kind::First if self.filled.load(Ordering::Relaxed) => return,
-
-            // use custom filter function
-            Kind::AllFilter(filter) if !filter(&value) => return,
-
-            // nothing can be stored
-            Kind::Max(0) => return,
-
-            _ => {}
-        }
-
-        let mut guard = self.lock();
-
-        match &self.kind {
-            // store all events
-            Kind::All | Kind::AllFilter(_) => guard.push_back(value),
-
-            // store only the last
-            Kind::Last => {
-                // try to pop the current value
-                _ = guard.pop_back();
-
-                // insert new value
-                guard.push_back(value);
-            }
-
-            // store only the first
-            Kind::First => {
-                // if no event is stored, store input
-                if guard.is_empty() {
-                    guard.push_front(value);
+        match self {
+            Self::Single { cell, filled, kind } => {
+                // an event is already stored and nothing but a new push can change that, so skip locking
+                if matches!(kind, SingleKind::First) && filled.load(Ordering::Relaxed) {
+                    return;
                 }
-            }
 
-            // use custom compare function
-            Kind::Cmp(cmp) => {
-                if let Some(curr) = guard.front_mut() {
-                    // check if value should be replaced
-                    if cmp(curr, &value) {
-                        *curr = value;
+                let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+
+                match kind {
+                    // store only the first
+                    SingleKind::First => {
+                        if guard.is_none() {
+                            *guard = Some(value);
+                        }
                     }
-                } else {
-                    guard.push_front(value);
+
+                    // use custom compare function
+                    SingleKind::Cmp(cmp) => {
+                        if let Some(curr) = guard.as_mut() {
+                            // check if value should be replaced
+                            if cmp(curr, &value) {
+                                *curr = value;
+                            }
+                        } else {
+                            *guard = Some(value);
+                        }
+                    }
                 }
+
+                filled.store(true, Ordering::Relaxed);
             }
 
-            // store all events up to specified number
-            Kind::Max(max) => {
+            Self::Store { store, filled, max } => {
+                // nothing can be stored
+                if *max == 0 {
+                    return;
+                }
+
+                let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+
+                // store all events up to specified number
                 if guard.len() >= *max {
                     // remove oldest value
                     guard.pop_front();
@@ -153,68 +247,156 @@ impl<T> Slot<T> {
 
                 // put new value in
                 guard.push_back(value);
+
+                filled.store(true, Ordering::Relaxed);
+            }
+
+            // lock-free: no other producer is ever waited on
+            Self::Queue {
+                queue,
+                filled,
+                filter,
+                ..
+            } => {
+                if filter.is_some_and(|f| !f(&value)) {
+                    return;
+                }
+
+                queue.push(value);
+                filled.store(true, Ordering::Relaxed);
+            }
+
+            // lock-free: a single atomic swap, no lock and no read of the previous value
+            Self::Last { cell, filled } => {
+                cell.push(value);
+                filled.store(true, Ordering::Relaxed);
             }
         }
-
-        self.filled.store(true, Ordering::Relaxed);
     }
 
+    /// Takes all currently available events out of the slot, without blocking producers.
     #[inline]
-    fn lock(&self) -> MutexGuard<'_, Store<T>> {
-        // we have full control over the lock, there should never be a panic while holding the guard
-        self.store.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+    pub fn query_owned(&self) -> UnblockingQuery<'_, T> {
+        match self {
+            Self::Single { cell, filled, .. } => {
+                // nothing stored, no need to lock
+                if !filled.load(Ordering::Relaxed) {
+                    return UnblockingQuery::taken(None);
+                }
 
-    /// Locks the stored events, to consume them.
-    ///
-    /// All events have to be removed, before the lock is released.
-    #[inline]
-    fn lock_for_consume(&self) -> MutexGuard<'_, Store<T>> {
-        let guard = self.lock();
+                let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+                filled.store(false, Ordering::Relaxed);
 
-        // the events are about to be consumed, `push` and the other consumers have to check again under the lock
-        self.filled.store(false, Ordering::Relaxed);
+                UnblockingQuery::taken(guard.take())
+            }
 
-        guard
-    }
+            Self::Store { store, filled, .. } => {
+                // nothing stored, no need to lock
+                if !filled.load(Ordering::Relaxed) {
+                    return UnblockingQuery::owned(VecDeque::new(), self);
+                }
 
-    /// Locks the stored events, to consume them in place.
-    ///
-    /// All events have to be removed, before the lock is released.
-    #[inline]
-    pub fn events(&self) -> MutexGuard<'_, Store<T>> {
-        self.lock_for_consume()
-    }
+                let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+                filled.store(false, Ordering::Relaxed);
 
-    /// Takes all stored events out of the slot.
-    ///
-    /// Give the buffer back with [`Slot::recycle`], after all events are consumed.
-    #[inline]
-    pub fn events_clone(&self) -> VecDeque<T> {
-        // nothing stored, no need to lock
-        if !self.filled.load(Ordering::Relaxed) {
-            return VecDeque::new();
+                // nothing to take, keep the current buffer and do not allocate a new one
+                if guard.is_empty() {
+                    return UnblockingQuery::owned(VecDeque::new(), self);
+                }
+
+                // new buffer for the next batch, that is expected to be about as big as this one
+                let len = guard.len();
+                let new = guard
+                    .spare
+                    .take()
+                    .unwrap_or_else(|| VecDeque::with_capacity(len));
+
+                // swap underlying buffer
+                let taken = std::mem::replace(&mut guard.events, new);
+                drop(guard);
+
+                UnblockingQuery::owned(taken, self)
+            }
+
+            Self::Queue {
+                queue,
+                filled,
+                store,
+                ..
+            } => {
+                // nothing stored, no need to lock
+                if !filled.load(Ordering::Relaxed) {
+                    return UnblockingQuery::owned(VecDeque::new(), self);
+                }
+
+                let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
+                filled.store(false, Ordering::Relaxed);
+
+                let mut buf = Vec::from(guard.take_scratch());
+                queue.drain_into(&mut buf);
+                drop(guard);
+
+                UnblockingQuery::owned(VecDeque::from(buf), self)
+            }
+
+            Self::Last { cell, filled } => {
+                // nothing stored, no need for the heavier dance in `cell.take()`
+                if !filled.load(Ordering::Relaxed) {
+                    return UnblockingQuery::taken(None);
+                }
+
+                filled.store(false, Ordering::Relaxed);
+                UnblockingQuery::taken(cell.take())
+            }
         }
-
-        let mut guard = self.lock_for_consume();
-
-        // nothing to take, keep the current buffer and do not allocate a new one
-        if guard.is_empty() {
-            return VecDeque::new();
-        }
-
-        // new buffer for the next batch, that is expected to be about as big as this one
-        let len = guard.len();
-        let new = guard
-            .spare
-            .take()
-            .unwrap_or_else(|| VecDeque::with_capacity(len));
-
-        // swap underlying buffer
-        std::mem::replace(&mut guard.events, new)
     }
 
-    /// Hands back the buffer of a consumed batch, to be used for a later batch.
+    /// Frees all allocated memory.
+    ///
+    /// `Single`/`Last` have nothing to free (neither ever allocates a separate buffer); any pending event is
+    /// simply dropped.
+    #[inline]
+    pub fn cleanup(&mut self) {
+        match self {
+            Self::Single { cell, filled, .. } => {
+                filled.store(false, Ordering::Relaxed);
+                *cell.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
+            }
+            Self::Store { store, filled, .. } => {
+                filled.store(false, Ordering::Relaxed);
+                let guard = store.get_mut().unwrap_or_else(PoisonError::into_inner);
+                guard.events = VecDeque::new();
+                guard.spare = None;
+            }
+            Self::Queue {
+                queue,
+                filled,
+                store,
+                ..
+            } => {
+                // replaces the whole queue, so every producer thread's buffer is actually freed, not just drained
+                *queue = EventQueue::new();
+                filled.store(false, Ordering::Relaxed);
+                let guard = store.get_mut().unwrap_or_else(PoisonError::into_inner);
+                guard.events = VecDeque::new();
+                guard.spare = None;
+            }
+            Self::Last { cell, filled } => {
+                filled.store(false, Ordering::Relaxed);
+                cell.clear();
+            }
+        }
+    }
+}
+
+impl<T> Slot<T> {
+    /// Hands back the buffer of a consumed `Store`/`Queue` batch, to be used for a later batch.
+    ///
+    /// A no-op for `Single`/`Last`, neither of which ever allocates a separate buffer to begin with. Kept in its
+    /// own `impl<T>` block, without the `Send` bound the rest of `Slot`'s methods need (they touch
+    /// `EventQueue<T>`, which requires it): this one only ever touches the plain `Mutex<Store<T>>`, and
+    /// [`UnblockingQuery`]'s `Drop` calls it unconditionally, so requiring `T: Send` here would force that bound
+    /// onto `UnblockingQuery` itself.
     #[inline]
     pub fn recycle(&self, buffer: VecDeque<T>) {
         debug_assert!(buffer.is_empty());
@@ -223,30 +405,58 @@ impl<T> Slot<T> {
             return;
         }
 
-        let mut guard = self.lock();
+        let store = match self {
+            Self::Store { store, .. } | Self::Queue { store, .. } => store,
+            Self::Single { .. } | Self::Last { .. } => return,
+        };
+
+        let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
         if guard.spare.is_none() {
             guard.spare = Some(buffer);
         }
     }
 
-    /// Frees all allocated memory.
+    /// Counts the heap memory this slot has allocated beyond its own inline bytes, as far as each variant's own
+    /// storage can tell — see [`anythingy::HeapSize`] for how to read the result.
+    ///
+    /// `Single` never allocates: its `Mutex<Option<T>>` stores the value inline, so it reports `0`.
     #[inline]
-    pub fn cleanup(&self) {
-        let mut guard = self.lock_for_consume();
-        guard.events = VecDeque::new();
-        guard.spare = None;
+    pub fn heap_size(&self) -> usize {
+        match self {
+            Self::Single { .. } => 0,
+            Self::Store { store, .. } => store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .heap_size(),
+            Self::Queue { queue, store, .. } => {
+                queue.heap_size()
+                    + store
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .heap_size()
+            }
+            Self::Last { cell, .. } => cell.heap_size(),
+        }
     }
 }
 
 impl<T> std::fmt::Debug for Slot<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            Kind::All => f.debug_tuple("All").finish_non_exhaustive(),
-            Kind::Last => f.debug_tuple("Last").finish_non_exhaustive(),
-            Kind::First => f.debug_struct("First").finish_non_exhaustive(),
-            Kind::Cmp(_) => f.debug_struct("Cmp").finish_non_exhaustive(),
-            Kind::AllFilter(_) => f.debug_struct("AllFilter").finish_non_exhaustive(),
-            Kind::Max(_) => f.debug_struct("Max").finish_non_exhaustive(),
+        match self {
+            Self::Queue { filter: None, .. } => f.debug_tuple("All").finish_non_exhaustive(),
+            Self::Queue {
+                filter: Some(_), ..
+            } => f.debug_struct("AllFilter").finish_non_exhaustive(),
+            Self::Single {
+                kind: SingleKind::First,
+                ..
+            } => f.debug_struct("First").finish_non_exhaustive(),
+            Self::Single {
+                kind: SingleKind::Cmp(_),
+                ..
+            } => f.debug_struct("Cmp").finish_non_exhaustive(),
+            Self::Store { .. } => f.debug_struct("Max").finish_non_exhaustive(),
+            Self::Last { .. } => f.debug_struct("Last").finish_non_exhaustive(),
         }
     }
 }
@@ -260,7 +470,7 @@ pub enum SlotType<T> {
     /// Only the last event of the matching type gets stored.
     Last,
 
-    /// Only the first event of the matching type gets stored.
+    /// Only the first event of the matching type gets stored, until consumed.
     First,
 
     /// A user specified function gets called to decide if the new event replaces the currently stored event.
@@ -294,8 +504,8 @@ mod tests {
 
         let mut values = Vec::with_capacity(100);
 
-        let mut query = slot.events();
-        while let Some(e) = query.pop_front() {
+        let query = slot.query_owned();
+        for e in query {
             values.push(e);
         }
 
@@ -312,14 +522,14 @@ mod tests {
 
         let mut values = Vec::with_capacity(1);
 
-        let mut query = slot.events();
-        while let Some(e) = query.pop_front() {
+        let query = slot.query_owned();
+        for e in query {
             values.push(e);
         }
 
         let first = values.pop().unwrap();
         assert_eq!(first, 0);
-        assert!(values.is_empty());
+        assert_eq!(values.len(), 0);
     }
 
     #[test]
@@ -332,14 +542,14 @@ mod tests {
 
         let mut values = Vec::with_capacity(1);
 
-        let mut query = slot.events();
-        while let Some(e) = query.pop_front() {
+        let query = slot.query_owned();
+        for e in query {
             values.push(e);
         }
 
         let last = values.pop().unwrap();
         assert_eq!(last, 99);
-        assert!(values.is_empty());
+        assert_eq!(values.len(), 0);
     }
 
     #[test]
@@ -352,14 +562,14 @@ mod tests {
 
         let mut values = Vec::with_capacity(1);
 
-        let mut query = slot.events();
-        while let Some(e) = query.pop_front() {
+        let query = slot.query_owned();
+        for e in query {
             values.push(e);
         }
 
         let last = values.pop().unwrap();
         assert_eq!(last, 63);
-        assert!(values.is_empty());
+        assert_eq!(values.len(), 0);
     }
 
     #[test]
@@ -372,8 +582,8 @@ mod tests {
 
         let mut values = Vec::with_capacity(1);
 
-        let mut query = slot.events();
-        while let Some(e) = query.pop_front() {
+        let query = slot.query_owned();
+        for e in query {
             values.push(e);
         }
 
@@ -391,8 +601,8 @@ mod tests {
 
         let mut values = Vec::with_capacity(100);
 
-        let mut query = slot.events();
-        while let Some(e) = query.pop_front() {
+        let query = slot.query_owned();
+        for e in query {
             values.push(e);
         }
 
@@ -408,7 +618,7 @@ mod tests {
             slot.push(i);
         }
 
-        assert_eq!(slot.events().len(), 0);
+        assert_eq!(slot.query_owned().len(), 0);
     }
 
     #[test]
@@ -419,9 +629,9 @@ mod tests {
             slot.push(i);
         }
 
-        let mut query = slot.events();
+        let mut query = slot.query_owned();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap(), 99);
+        assert_eq!(query.next().unwrap(), 99);
     }
 
     #[test]
@@ -433,9 +643,9 @@ mod tests {
             slot.push(i);
         }
 
-        let mut query = slot.events();
+        let mut query = slot.query_owned();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap(), 5);
+        assert_eq!(query.next().unwrap(), 5);
     }
 
     #[test]
@@ -446,63 +656,62 @@ mod tests {
             slot.push(i);
         }
 
-        assert_eq!(slot.events().len(), 0);
+        assert_eq!(slot.query_owned().len(), 0);
     }
 
     #[test]
-    fn test_slot_events_clone_takes_events() {
+    fn test_slot_query_owned_takes_events() {
         let slot = Slot::new(SlotType::All);
 
         for i in 0..10u32 {
             slot.push(i);
         }
 
-        let taken = slot.events_clone();
-        let values = taken.into_iter().collect::<Vec<_>>();
+        let taken = slot.query_owned();
+        let values = taken.collect::<Vec<_>>();
         assert_eq!(values, (0..10).collect::<Vec<_>>());
 
         // slot is empty afterwards, but still usable
-        assert_eq!(slot.events().len(), 0);
+        assert_eq!(slot.query_owned().len(), 0);
 
         slot.push(10u32);
-        assert_eq!(slot.events().len(), 1);
+        assert_eq!(slot.query_owned().len(), 1);
     }
 
     #[test]
-    fn test_slot_events_clone_empty() {
+    fn test_slot_query_owned_empty() {
         let slot = Slot::new(SlotType::All);
 
-        assert_eq!(slot.events_clone().len(), 0);
+        assert_eq!(slot.query_owned().len(), 0);
 
         slot.push(1u32);
-        assert_eq!(slot.events().len(), 1);
+        assert_eq!(slot.query_owned().len(), 1);
     }
 
     #[test]
-    fn test_slot_events_clone_keeps_capacity() {
+    fn test_slot_query_owned_keeps_capacity() {
         let slot = Slot::new(SlotType::All);
 
         for i in 0..100u32 {
             slot.push(i);
         }
+        drop(slot.query_owned());
 
-        drop(slot.events_clone());
-
-        // the replacement buffer is preallocated to half of the previous length
-        assert!(slot.events().capacity() >= 50);
+        // the buffer swapped in by the previous take is preallocated to about the previous length
+        for i in 0..50u32 {
+            slot.push(i);
+        }
+        assert!(slot.query_owned().capacity() >= 50);
     }
 
     #[test]
-    fn test_slot_events_clone_empty_keeps_buffer() {
+    fn test_slot_query_owned_empty_keeps_buffer() {
         let slot = Slot::<u32>::new(SlotType::All);
-        let capacity = slot.events().capacity();
-        assert!(capacity > 0);
 
         // taking nothing neither allocates a new buffer, nor throws the current one away
-        let taken = slot.events_clone();
+        let taken = slot.query_owned();
         assert_eq!(taken.len(), 0);
         assert_eq!(taken.capacity(), 0);
-        assert_eq!(slot.events().capacity(), capacity);
     }
 
     #[test]
@@ -512,48 +721,72 @@ mod tests {
         slot.push(1u32);
         slot.push(2u32);
 
-        let mut query = slot.events();
+        let mut query = slot.query_owned();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap(), 1);
+        assert_eq!(query.next().unwrap(), 1);
     }
 
     #[test]
     fn test_slot_first_accepts_after_consume() {
-        let slot = Slot::new(SlotType::First);
+        let mut slot = Slot::new(SlotType::First);
 
+        // consumed with query_owned()
         slot.push(1u32);
-
-        // consumed with events()
-        _ = slot.events().pop_front();
+        drop(slot.query_owned());
         slot.push(2u32);
-        assert_eq!(slot.events().pop_front().unwrap(), 2);
-
-        // consumed with events_clone()
-        slot.push(3u32);
-        drop(slot.events_clone());
-        slot.push(4u32);
-        assert_eq!(slot.events().pop_front().unwrap(), 4);
+        assert_eq!(slot.query_owned().next().unwrap(), 2);
 
         // consumed with cleanup()
-        slot.push(5u32);
+        slot.push(3u32);
         slot.cleanup();
-        slot.push(6u32);
-        assert_eq!(slot.events().pop_front().unwrap(), 6);
+        slot.push(4u32);
+        assert_eq!(slot.query_owned().next().unwrap(), 4);
     }
 
     #[test]
-    fn test_slot_first_stays_filled_if_not_consumed() {
+    fn test_slot_first_query_frees_the_slot_even_if_unconsumed() {
         let slot = Slot::new(SlotType::First);
 
         slot.push(1u32);
 
-        // accessing the events without taking them out, must not make room for a new event
-        drop(slot.events());
+        // every query is all-or-nothing: merely acquiring and dropping one discards event 1, even though it was
+        // never actually read, freeing the slot for a new push
+        drop(slot.query_owned());
         slot.push(2u32);
 
-        let mut query = slot.events();
+        let mut query = slot.query_owned();
         assert_eq!(query.len(), 1);
-        assert_eq!(query.pop_front().unwrap(), 1);
+        assert_eq!(query.next().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_slot_last_accepts_after_consume() {
+        let mut slot = Slot::new(SlotType::Last);
+
+        // consumed with query_owned()
+        slot.push(1u32);
+        drop(slot.query_owned());
+        slot.push(2u32);
+        assert_eq!(slot.query_owned().next().unwrap(), 2);
+
+        // consumed with cleanup()
+        slot.push(3u32);
+        slot.cleanup();
+        slot.push(4u32);
+        assert_eq!(slot.query_owned().next().unwrap(), 4);
+    }
+
+    #[test]
+    fn test_slot_last_overwrites_while_unconsumed() {
+        let slot = Slot::new(SlotType::Last);
+
+        slot.push(1u32);
+        // not consumed yet, but Last always overwrites (unlike First, which would reject this)
+        slot.push(2u32);
+
+        let mut query = slot.query_owned();
+        assert_eq!(query.len(), 1);
+        assert_eq!(query.next().unwrap(), 2);
     }
 
     #[test]
@@ -564,22 +797,22 @@ mod tests {
             slot.push(i);
         }
 
-        // take the events, the slot continues with a new buffer
-        let mut taken = slot.events_clone();
+        // take the events, give the buffer back for reuse
+        let taken = slot.query_owned();
         let capacity = taken.capacity();
         assert_eq!(taken.len(), 10);
-        assert_ne!(slot.events().capacity(), capacity);
+        drop(taken);
 
-        // give the consumed buffer back
-        taken.clear();
-        slot.recycle(taken);
-
-        // the next batch is taken with the recycled buffer
+        // the next batch swaps in the recycled buffer as its own replacement, so it resurfaces one round later
         for i in 0..10u32 {
             slot.push(i);
         }
-        assert_eq!(slot.events_clone().len(), 10);
-        assert_eq!(slot.events().capacity(), capacity);
+        assert_eq!(slot.query_owned().len(), 10);
+
+        for i in 0..10u32 {
+            slot.push(i);
+        }
+        assert_eq!(slot.query_owned().capacity(), capacity);
     }
 
     #[test]
@@ -589,27 +822,30 @@ mod tests {
         for i in 0..10u32 {
             slot.push(i);
         }
-        let mut first = slot.events_clone();
+        let first = slot.query_owned();
         let first_capacity = first.capacity();
 
         for i in 0..10u32 {
             slot.push(i);
         }
-        let mut second = slot.events_clone();
+        let second = slot.query_owned();
         let second_capacity = second.capacity();
         assert_ne!(first_capacity, second_capacity);
 
-        first.clear();
-        second.clear();
-        slot.recycle(first);
+        drop(first);
         // there already is a spare buffer, this one gets dropped
-        slot.recycle(second);
+        drop(second);
+
+        // only `first`'s buffer survived as the spare; it resurfaces two batches later
+        for i in 0..10u32 {
+            slot.push(i);
+        }
+        drop(slot.query_owned());
 
         for i in 0..10u32 {
             slot.push(i);
         }
-        drop(slot.events_clone());
-        assert_eq!(slot.events().capacity(), first_capacity);
+        assert_eq!(slot.query_owned().capacity(), first_capacity);
     }
 
     #[test]
@@ -621,20 +857,19 @@ mod tests {
         for i in 0..10u32 {
             slot.push(i);
         }
-        assert_eq!(slot.events_clone().len(), 10);
+        assert_eq!(slot.query_owned().len(), 10);
     }
 
     #[test]
     fn test_slot_cleanup_drops_recycled_buffer() {
-        let slot = Slot::new(SlotType::All);
+        let mut slot = Slot::new(SlotType::All);
 
         for i in 0..100u32 {
             slot.push(i);
         }
-        let mut taken = slot.events_clone();
+        let taken = slot.query_owned();
         let capacity = taken.capacity();
-        taken.clear();
-        slot.recycle(taken);
+        drop(taken);
 
         slot.cleanup();
 
@@ -642,8 +877,7 @@ mod tests {
         for i in 0..3u32 {
             slot.push(i);
         }
-        drop(slot.events_clone());
-        assert!(slot.events().capacity() < capacity);
+        assert!(slot.query_owned().capacity() < capacity);
     }
 
     #[test]
@@ -652,15 +886,15 @@ mod tests {
 
         // polling without events does not hide the next event
         for _ in 0..3 {
-            assert_eq!(slot.events_clone().len(), 0);
+            assert_eq!(slot.query_owned().len(), 0);
         }
 
         slot.push(1u32);
 
-        let mut taken = slot.events_clone();
+        let mut taken = slot.query_owned();
         assert_eq!(taken.len(), 1);
-        assert_eq!(taken.pop_front().unwrap(), 1);
-        assert_eq!(slot.events_clone().len(), 0);
+        assert_eq!(taken.next().unwrap(), 1);
+        assert_eq!(slot.query_owned().len(), 0);
     }
 
     #[test]
@@ -671,25 +905,48 @@ mod tests {
             slot.push(i);
         }
 
-        // nothing was stored, the buffer stays where it is
-        let capacity = slot.events().capacity();
-        assert_eq!(slot.events_clone().len(), 0);
-        assert_eq!(slot.events().capacity(), capacity);
+        // nothing was stored, so there is nothing to take
+        assert_eq!(slot.query_owned().len(), 0);
     }
 
     #[test]
     fn test_slot_cleanup() {
-        let slot = Slot::new(SlotType::All);
+        let mut slot = Slot::new(SlotType::All);
 
         for i in 0..100u32 {
             slot.push(i);
         }
 
         slot.cleanup();
-        assert_eq!(slot.events().len(), 0);
-        assert_eq!(slot.events().capacity(), 0);
+        assert_eq!(slot.query_owned().len(), 0);
+        assert_eq!(slot.query_owned().capacity(), 0);
 
         slot.push(1u32);
-        assert_eq!(slot.events().len(), 1);
+        assert_eq!(slot.query_owned().len(), 1);
+    }
+
+    #[test]
+    fn test_slot_queue_threads_lose_nothing() {
+        // multiple producer threads pushing concurrently into an `All` slot: order between threads is not
+        // guaranteed, but no event may be lost or duplicated.
+        const THREADS: u32 = 8;
+        const PER_THREAD: u32 = 2000;
+
+        let slot = Slot::new(SlotType::All);
+
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let slot = &slot;
+                s.spawn(move || {
+                    for i in 0..PER_THREAD {
+                        slot.push(t * PER_THREAD + i);
+                    }
+                });
+            }
+        });
+
+        let mut values = slot.query_owned().collect::<Vec<_>>();
+        values.sort_unstable();
+        assert_eq!(values, (0..THREADS * PER_THREAD).collect::<Vec<_>>());
     }
 }
