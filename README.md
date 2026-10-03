@@ -7,8 +7,9 @@
 A library for dispatching and processing events. Events can be handled in a deferred and/or immediate way.
 
 Events can be:
-* handled with an event listener: `EventBackend::register_listener()`
-* stored, to be handled later as a batch: `EventBackend::register_store()`
+
+- handled with an event listener: `EventBackend::register_listener()`
+- stored, to be handled later as a batch: `EventBackend::register_store()`
 
 To trigger a new event, call `EventBackend::new_event()`. Stored events are taken out with `EventBackend::consume()`,
 or looked at, by any number of readers, with `EventBackend::observe()`.
@@ -24,8 +25,9 @@ It needs Rust 1.88 or newer.
 ## Using an `EventBackend`
 
 Using an `EventBackend` should generally be done in 2 phases:
-* Create a new `EventBackend` and register all events
-* Use the `EventBackend` to trigger new events
+
+- Create a new `EventBackend` and register all events
+- Use the `EventBackend` to trigger new events
 
 Events can be triggered without needing mutable access to the `EventBackend`,
 so it can be shared between threads (for example in a `static`).
@@ -37,6 +39,7 @@ can be used as an event, regardless of its size.
 ## Example
 
 ### Example Listeners
+
 ```rust
 use eventsys::EventBackend;
 // create event system
@@ -55,6 +58,7 @@ system.new_event::<u32>(123).unwrap();
 ```
 
 ### Example Consuming
+
 ```rust
 use eventsys::{EventBackend, SlotType};
 // create event system
@@ -84,14 +88,14 @@ dropped are discarded.
 
 `SlotType` decides which events of a registered type are stored:
 
-| `SlotType`        | Stores                                                                                  |
-|-------------------|-----------------------------------------------------------------------------------------|
-| `All`             | Every event.                                                                            |
-| `AllFilter(f)`    | Every event, for which `f` returns `true`.                                              |
-| `Max(n)`          | Up to `n` events; any more replace the oldest events.                                  |
-| `Last`            | Only the most recent event.                                                             |
-| `First`           | Only the first event, until it is consumed; any other events are discarded.             |
-| `Cmp(f)`          | One event; a new event replaces the stored one, if `f(current, new)` returns `true`.    |
+| `SlotType`     | Stores                                                                               |
+| -------------- | ------------------------------------------------------------------------------------ |
+| `All`          | Every event.                                                                         |
+| `AllFilter(f)` | Every event, for which `f` returns `true`.                                           |
+| `Max(n)`       | Up to `n` events; any more replace the oldest events.                                |
+| `Last`         | Only the most recent event.                                                          |
+| `First`        | Only the first event, until it is consumed; any other events are discarded.          |
+| `Cmp(f)`       | One event; a new event replaces the stored one, if `f(current, new)` returns `true`. |
 
 `All` and `AllFilter` accept events from multiple threads without them waiting for each other. The order of events
 is only guaranteed per thread, not between threads. `Last` is lock-free.
@@ -122,12 +126,12 @@ assert!(system.observe::<u32>().unwrap().as_slice().is_empty());
 
 `consume` and `observe` both hand out the events of a type, but differ in who gets them:
 
-|                  | `EventBackend::consume`                    | `EventBackend::observe`                        |
-|------------------|--------------------------------------------|------------------------------------------------|
-| Returns          | `Consumed`, an iterator of `T`             | `Observed`, an iterator of `&T`                |
-| Events           | taken out of the event system              | stay in the event system, shared               |
-| Callers          | one, the first one gets everything         | any number, on any thread, all see the same    |
-| Calling it again | returns what was triggered since           | returns the same events until `reset`          |
+|                  | `EventBackend::consume`            | `EventBackend::observe`                     |
+| ---------------- | ---------------------------------- | ------------------------------------------- |
+| Returns          | `Consumed`, an iterator of `T`     | `Observed`, an iterator of `&T`             |
+| Events           | taken out of the event system      | stay in the event system, shared            |
+| Callers          | one, the first one gets everything | any number, on any thread, all see the same |
+| Calling it again | returns what was triggered since   | returns the same events until `reset`       |
 
 Iterating is the main way to get at the events. Both types are used the same way: they know how many events are left
 (`len`, `is_empty`), and, for code that needs a slice, have an `as_slice()` with the events that were not iterated over
@@ -186,11 +190,12 @@ let bytes = system.heap_size();
 
 Each example shows one thing, and is set up the same way: register the event types, trigger events, handle them.
 
-| Example | Shows | Run |
-|---------|-------|-----|
-| [`listeners`](./examples/listeners.rs) | handling events right away, with a listener | `cargo run --example listeners` |
-| [`consume`](./examples/consume.rs) | taking events out of the event system, to handle them in one place | `cargo run --example consume` |
-| [`observe`](./examples/observe.rs) | looking at events without taking them out, so everyone sees the same ones | `cargo run --example observe` |
+| Example                                | Shows                                                                     | Run                             |
+| -------------------------------------- | ------------------------------------------------------------------------- | ------------------------------- |
+| [`listeners`](./examples/listeners.rs) | handling events right away, with a listener                               | `cargo run --example listeners` |
+| [`consume`](./examples/consume.rs)     | taking events out of the event system, to handle them in one place        | `cargo run --example consume`   |
+| [`observe`](./examples/observe.rs)     | looking at events without taking them out, so everyone sees the same ones | `cargo run --example observe`   |
 
 ## Licence
-This project is licensed under the [MIT license](./LICENCE).
+
+This project is licensed under the [MIT license](./LICENSE).
